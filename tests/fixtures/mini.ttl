@@ -1,0 +1,152 @@
+@prefix : <http://example.org/mini#> .
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+
+<http://example.org/mini> a owl:Ontology ;
+    rdfs:label "Mini" ;
+    owl:versionIRI <http://example.org/mini/1.0> .
+
+:Pizza a owl:Class ; rdfs:label "Pizza" .
+:NamedPizza a owl:Class ;
+    rdfs:label "Named pizza"@en ;
+    rdfs:label "Pizza nomeada"@pt ;
+    rdfs:subClassOf :Pizza .
+:CheeseTopping a owl:Class ; rdfs:label "Cheese topping" .
+:MeatTopping a owl:Class ; rdfs:label "Meat topping" .
+:PizzaTopping a owl:Class ; rdfs:label "Pizza topping" .
+:PizzaBase a owl:Class ; rdfs:label "Pizza base" .
+:CheeseTopping rdfs:subClassOf :PizzaTopping .
+:MeatTopping rdfs:subClassOf :PizzaTopping .
+:Pizza owl:disjointWith :PizzaTopping .
+:CheeseTopping owl:disjointWith :MeatTopping .
+
+:hasTopping a owl:ObjectProperty ;
+    rdfs:label "has topping" ;
+    rdfs:domain :Pizza ;
+    rdfs:range :PizzaTopping .
+
+:hasBase a owl:ObjectProperty, owl:FunctionalProperty ;
+    rdfs:label "has base" ;
+    rdfs:domain :Pizza ;
+    rdfs:range :PizzaBase .
+
+:isBaseOf a owl:ObjectProperty, owl:InverseFunctionalProperty ;
+    rdfs:label "is base of" .
+
+:hasCalories a owl:DatatypeProperty, owl:FunctionalProperty ;
+    rdfs:label "has calories" ;
+    rdfs:domain :Pizza ;
+    rdfs:range xsd:integer .
+
+:CheesyPizza a owl:Class ;
+    rdfs:label "Cheesy pizza" ;
+    rdfs:subClassOf [
+        a owl:Restriction ;
+        owl:onProperty :hasTopping ;
+        owl:someValuesFrom :CheeseTopping
+    ] .
+
+:CheeseOnlyPizza a owl:Class ;
+    rdfs:label "Cheese only pizza" ;
+    rdfs:subClassOf [
+        a owl:Restriction ;
+        owl:onProperty :hasTopping ;
+        owl:allValuesFrom :CheeseTopping
+    ] .
+
+:InterestingPizza a owl:Class ;
+    rdfs:label "Interesting pizza" ;
+    rdfs:subClassOf [
+        a owl:Restriction ;
+        owl:onProperty :hasTopping ;
+        owl:minCardinality "3"^^xsd:nonNegativeInteger
+    ] .
+
+:ClosedPizza a owl:Class ;
+    rdfs:label "Closed pizza" ;
+    rdfs:subClassOf [
+        a owl:Restriction ;
+        owl:onProperty :hasTopping ;
+        owl:maxQualifiedCardinality "2"^^xsd:nonNegativeInteger ;
+        owl:onClass :MeatTopping
+    ] .
+
+:ExactPizza a owl:Class ;
+    rdfs:label "Exact pizza" ;
+    rdfs:subClassOf [
+        a owl:Restriction ;
+        owl:onProperty :hasTopping ;
+        owl:qualifiedCardinality "1"^^xsd:nonNegativeInteger ;
+        owl:onClass :CheeseTopping
+    ] .
+
+:MozzarellaTopping a owl:Class ;
+    rdfs:label "Mozzarella topping" ;
+    owl:equivalentClass :CheeseTopping .
+
+:VegetarianPizza a owl:Class ;
+    rdfs:label "Vegetarian pizza" ;
+    owl:equivalentClass [
+        a owl:Class ;
+        owl:intersectionOf (
+            :Pizza
+            [
+                a owl:Restriction ;
+                owl:onProperty :hasTopping ;
+                owl:allValuesFrom :CheeseTopping
+            ]
+        )
+    ] .
+
+:ThreeToppingPizza a owl:Class ;
+    rdfs:label "Three topping pizza" ;
+    owl:equivalentClass [
+        a owl:Restriction ;
+        owl:onProperty :hasTopping ;
+        owl:cardinality "3"^^xsd:nonNegativeInteger
+    ] .
+
+:AmericanPizza a owl:Class ;
+    rdfs:label "American pizza" ;
+    rdfs:subClassOf [
+        a owl:Restriction ;
+        owl:onProperty :hasCountry ;
+        owl:hasValue :America
+    ] .
+
+:hasCountry a owl:ObjectProperty ; rdfs:label "has country" .
+:America a owl:NamedIndividual ; rdfs:label "America" .
+
+:FlexiblePizza a owl:Class ;
+    rdfs:label "Flexible pizza" ;
+    rdfs:subClassOf [
+        a owl:Restriction ;
+        owl:onProperty :hasTopping ;
+        owl:someValuesFrom [
+            a owl:Class ;
+            owl:unionOf ( :CheeseTopping :MeatTopping )
+        ]
+    ] .
+
+:WhitePizza a owl:Class ;
+    rdfs:label "White pizza" ;
+    owl:intersectionOf (
+        :Pizza
+        [
+            a owl:Restriction ;
+            owl:onProperty :hasTopping ;
+            owl:hasValue :MozzarellaTopping
+        ]
+    ) .
+
+:Odd a owl:Class ;
+    rdfs:label "Odd" ;
+    rdfs:subClassOf [ rdfs:comment "not a class expression" ] .
+
+[] a owl:AllDisjointClasses ;
+    owl:members ( :Pizza :PizzaTopping :PizzaBase ) .
+
+:hasIngredient a owl:ObjectProperty, owl:TransitiveProperty ;
+    rdfs:label "has ingredient" .
