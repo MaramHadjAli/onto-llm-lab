@@ -208,6 +208,10 @@ tempCodeRunnerFile.py
 # Ruff stuff:
 .ruff_cache/
 
+# Local LLM cache and scratch downloads. Experiment outputs under results/ are committed.
+cache/
+_staging/
+
 # PyPI configuration file
 .pypirc
 
