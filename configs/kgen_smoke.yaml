@@ -1,0 +1,17 @@
+ontology: data/ontologies/pizza.owl
+n_classes: 2
+n_individuals: 3
+class_seed: 0
+seeds:
+  - 0
+  - 1
+conditions:
+  - A0
+  - A1
+provider: ollama
+model: qwen2.5:0.5b
+base_url: http://127.0.0.1:11434
+temperature: 0
+max_tokens: 1500
+output: results/kgen_smoke.json
+validate: true
