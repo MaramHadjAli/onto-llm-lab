@@ -55,3 +55,4 @@ known-first-party = ["ollab", "tests"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q --tb=short"
+  pythonpath = ["."]
