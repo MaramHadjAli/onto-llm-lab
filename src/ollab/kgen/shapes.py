@@ -61,8 +61,7 @@ def _add_axiom(graph: Graph, axiom: Axiom) -> str | None:
             target_predicate=SH.targetSubjectsOf,
             target=URIRef(axiom.prop),
             message=(
-                f"Every subject of <{axiom.prop}> must have explicit "
-                f"rdf:type <{axiom.right.iri}>."
+                f"Every subject of <{axiom.prop}> must have explicit rdf:type <{axiom.right.iri}>."
             ),
             class_iri=axiom.right.iri,
         )
@@ -74,8 +73,7 @@ def _add_axiom(graph: Graph, axiom: Axiom) -> str | None:
             target_predicate=SH.targetObjectsOf,
             target=URIRef(axiom.prop),
             message=(
-                f"Every object of <{axiom.prop}> must have explicit "
-                f"rdf:type <{axiom.right.iri}>."
+                f"Every object of <{axiom.prop}> must have explicit rdf:type <{axiom.right.iri}>."
             ),
             class_iri=axiom.right.iri,
         )
