@@ -128,7 +128,7 @@ def execute(
                 consistency = None
                 conforms: bool | None = None
                 violations: tuple[ShaclViolation, ...] = ()
-                if config.check and generated.parse_ok and generated.turtle:
+                if config.check and generated.lenient_parse_ok and generated.turtle:
                     consistency = check_consistency(ontology_path, generated.turtle)
                     if shapes is not None:
                         conforms, violations = validate_shacl(

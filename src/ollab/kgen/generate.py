@@ -9,11 +9,16 @@ Target classes are chosen once from a seeded sample of the named classes,
 then sorted by IRI. Fresh individual IRIs are allowed. A predicate, a
 ``rdf:type`` object, or a non-individual object IRI that is outside the
 ontology and outside the RDF, RDFS, OWL, and XSD namespaces is an undefined term.
+
+Output parsing is the same for A0 and A1. ``strict_parse_ok`` is true when
+the raw completion parses as Turtle. ``lenient_parse_ok`` is true when the
+text parses after :func:`extract_turtle`. That function is the only repair:
+it drops a markdown fence, including an unclosed one, and keeps the first
+Turtle block. It does not add prefixes, insert punctuation, or rewrite IRIs.
 """
 
 from __future__ import annotations
 
-import re
 from typing import Literal
 
 import numpy as np
@@ -26,7 +31,6 @@ from ollab.core.ontology import Axiom, Expr, Ontology
 from ollab.core.verbalize import local_name, verbalize
 
 Condition = Literal["A0", "A1"]
-_FENCE = re.compile(r"```(?:turtle|ttl)?\s*\n(.*?)```", re.DOTALL | re.IGNORECASE)
 _BUILTIN_PREFIXES = (
     "http://www.w3.org/1999/02/22-rdf-syntax-ns#",
     "http://www.w3.org/2000/01/rdf-schema#",
@@ -41,7 +45,12 @@ _EXCLUDED = {
 
 
 class GenerationRecord(BaseModel):
-    """One class, one seed, one condition."""
+    """One class, one seed, one condition.
+
+    ``strict_parse_ok`` is the raw completion. ``lenient_parse_ok`` is the
+    result after ``extract_turtle``. ``parse_error`` is that second parse's
+    error, and is null when the lenient parse succeeds.
+    """
 
     model_config = ConfigDict(frozen=True)
 
@@ -52,7 +61,8 @@ class GenerationRecord(BaseModel):
     model: str
     temperature: float
     prompt_hash: str
-    parse_ok: bool
+    strict_parse_ok: bool
+    lenient_parse_ok: bool
     parse_error: str | None
     n_requested: int
     n_individuals: int
@@ -181,7 +191,10 @@ def generate_individuals(
             max_tokens=max_tokens,
         )
     )
-    turtle, error, parsed = _parse_turtle(response.text)
+    raw = response.text
+    _, strict_error, _ = _parse_graph(raw)
+    extracted = extract_turtle(raw)
+    turtle, lenient_error, parsed = _parse_graph(extracted)
     undefined: tuple[str, ...] = ()
     count = 0
     if parsed is not None:
@@ -195,13 +208,14 @@ def generate_individuals(
         model=response.model,
         temperature=temperature,
         prompt_hash=response.prompt_hash,
-        parse_ok=error is None,
-        parse_error=error,
+        strict_parse_ok=strict_error is None,
+        lenient_parse_ok=lenient_error is None,
+        parse_error=lenient_error,
         n_requested=n_individuals,
         n_individuals=count,
         undefined_terms=undefined,
-        turtle=turtle if error is None else None,
-        raw_text=response.text,
+        turtle=turtle if lenient_error is None else None,
+        raw_text=raw,
     )
 
 
@@ -223,11 +237,34 @@ def undefined_terms(ontology: Ontology, data: Graph) -> tuple[str, ...]:
     return tuple(sorted(bad))
 
 
-def _parse_turtle(text: str) -> tuple[str | None, str | None, Graph | None]:
-    candidate = _extract_turtle(text)
+def extract_turtle(text: str) -> str:
+    """Return the first Turtle block, with its markdown fence removed.
+
+    An opening fence is ````` `` plus an optional language tag on that line.
+    A later ````` `` closes it. If the fence is unclosed, the block is the
+    remainder of the text. Text before the first fence is discarded. When a
+    block is tagged ``turtle`` or ``ttl``, the first such block is used;
+    otherwise the first fence is used. With no fence, the stripped text is
+    returned unchanged.
+
+    This is the only repair applied to model output. It does not add
+    prefixes, insert punctuation, or rewrite IRIs. A0 and A1 both call it.
+    """
+    stripped = text.strip()
+    spans = _fence_spans(stripped)
+    if not spans:
+        return stripped
+    for tag, body in spans:
+        if tag.lower() in {"turtle", "ttl"}:
+            return body.strip()
+    return spans[0][1].strip()
+
+
+def _parse_graph(text: str) -> tuple[str | None, str | None, Graph | None]:
+    """Parse ``text`` as Turtle. The text is not modified before parsing."""
     graph = Graph()
     try:
-        graph.parse(data=candidate, format="turtle")
+        graph.parse(data=text, format="turtle")
     except Exception as exc:
         return None, f"{type(exc).__name__}: {exc}", None
     serialized = graph.serialize(format="turtle")
@@ -236,12 +273,28 @@ def _parse_turtle(text: str) -> tuple[str | None, str | None, Graph | None]:
     return serialized, None, graph
 
 
-def _extract_turtle(text: str) -> str:
-    stripped = text.strip()
-    fenced = _FENCE.search(stripped)
-    if fenced:
-        return fenced.group(1).strip()
-    return stripped
+def _fence_spans(text: str) -> list[tuple[str, str]]:
+    """Return ``(language tag, body)`` for each markdown fence, in order.
+
+    The last fence may be unclosed. Its body then runs to the end of ``text``.
+    """
+    spans: list[tuple[str, str]] = []
+    cursor = 0
+    while True:
+        start = text.find("```", cursor)
+        if start < 0:
+            return spans
+        line_end = text.find("\n", start)
+        if line_end < 0:
+            spans.append((text[start + 3 :].strip(), ""))
+            return spans
+        tag = text[start + 3 : line_end].strip()
+        close = text.find("```", line_end + 1)
+        if close < 0:
+            spans.append((tag, text[line_end + 1 :]))
+            return spans
+        spans.append((tag, text[line_end + 1 : close]))
+        cursor = close + 3
 
 
 def _individual_count(graph: Graph) -> int:
