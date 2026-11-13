@@ -1,0 +1,19 @@
+# Violates Margaux madeFromGrape max 1. The Wine exactly-1 properties have one value.
+# The two grapes are not declared owl:differentFrom.
+@prefix wine: <http://www.w3.org/TR/2003/PR-owl-guide-20031209/wine#> .
+@prefix ex: <http://ollab.local/fixture/wine/> .
+
+ex:bottle a wine:Wine, wine:Margaux ;
+    wine:hasColor ex:color ;
+    wine:hasBody ex:body ;
+    wine:hasFlavor ex:flavor ;
+    wine:hasSugar ex:sugar ;
+    wine:hasMaker ex:maker ;
+    wine:madeFromGrape ex:grape1, ex:grape2 .
+ex:color a wine:WineColor .
+ex:body a wine:WineBody .
+ex:flavor a wine:WineFlavor .
+ex:sugar a wine:WineSugar .
+ex:maker a wine:Winery .
+ex:grape1 a wine:WineGrape .
+ex:grape2 a wine:WineGrape .

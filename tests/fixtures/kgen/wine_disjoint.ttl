@@ -1,0 +1,20 @@
+# Violates LateHarvest owl:disjointWith EarlyHarvest.
+# The Wine count restrictions are filled, so a SHACL miss on those counts is
+# not mixed into this case. LateHarvest and EarlyHarvest are subclasses of Wine;
+# the explicit Wine type matches the domain shapes.
+@prefix wine: <http://www.w3.org/TR/2003/PR-owl-guide-20031209/wine#> .
+@prefix ex: <http://ollab.local/fixture/wine/> .
+
+ex:harvest a wine:Wine, wine:LateHarvest, wine:EarlyHarvest ;
+    wine:hasColor ex:color ;
+    wine:hasBody ex:body ;
+    wine:hasFlavor ex:flavor ;
+    wine:hasSugar ex:sugar ;
+    wine:hasMaker ex:maker ;
+    wine:madeFromGrape ex:grape .
+ex:color a wine:WineColor .
+ex:body a wine:WineBody .
+ex:flavor a wine:WineFlavor .
+ex:sugar a wine:WineSugar .
+ex:maker a wine:Winery .
+ex:grape a wine:WineGrape .

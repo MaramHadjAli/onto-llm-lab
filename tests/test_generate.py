@@ -6,6 +6,7 @@ from ollab.core.verbalize import verbalize
 from ollab.kgen.generate import (
     axioms_for_class,
     build_prompt,
+    extract_turtle,
     generate_individuals,
     select_classes,
 )
@@ -56,7 +57,8 @@ def test_parse_failure_is_counted() -> None:
         seed=0,
         model="mock-1",
     )
-    assert record.parse_ok is False
+    assert record.strict_parse_ok is False
+    assert record.lenient_parse_ok is False
     assert record.parse_error
     assert record.n_individuals == 0
     assert record.provider == "mock"
@@ -87,9 +89,70 @@ def test_undefined_property_is_reported_and_fenced_turtle_parses() -> None:
         seed=1,
         model="mock-1",
     )
-    assert record.parse_ok is True
+    assert record.strict_parse_ok is False
+    assert record.lenient_parse_ok is True
+    assert record.parse_error is None
     assert record.n_individuals == 3
     assert f"{NS}notAProperty" in record.undefined_terms
     assert f"{NS}InventedClass" in record.undefined_terms
     assert f"{NS}Pizza" not in record.undefined_terms
     assert f"{NS}one" not in record.undefined_terms
+
+
+def test_raw_turtle_is_strict_and_a_missing_dot_is_not_repaired() -> None:
+    ontology = load_ontology(MINI)
+    raw = f"@prefix : <{NS}> .\n:one a :Pizza .\n"
+
+    def respond(_request: LLMRequest) -> str:
+        return raw
+
+    record = generate_individuals(
+        ontology,
+        str(MINI),
+        make_client("mock", responder=respond),
+        target_class=f"{NS}Pizza",
+        condition="A0",
+        n_individuals=1,
+        seed=0,
+        model="mock-1",
+    )
+    assert record.strict_parse_ok is True
+    assert record.lenient_parse_ok is True
+    broken = "```turtle\n:one a :Pizza\n```"
+    assert extract_turtle(broken) == ":one a :Pizza"
+    client = make_client("mock", responder=lambda _request: broken)
+    failed = generate_individuals(
+        ontology,
+        str(MINI),
+        client,
+        target_class=f"{NS}Pizza",
+        condition="A1",
+        n_individuals=1,
+        seed=0,
+        model="mock-1",
+    )
+    assert failed.strict_parse_ok is False
+    assert failed.lenient_parse_ok is False
+
+
+def test_unclosed_fence_and_first_turtle_block() -> None:
+    body = f"@prefix : <{NS}> .\n:one a :Pizza .\n"
+    unclosed = "```turtle\n" + body
+    assert extract_turtle(unclosed) == body.strip()
+    wrapped = "note\n```json\n{ }\n```\n```ttl\n" + body + "```\n"
+    assert extract_turtle(wrapped) == body.strip()
+    ontology = load_ontology(MINI)
+    flags = []
+    for condition in ("A0", "A1"):
+        record = generate_individuals(
+            ontology,
+            str(MINI),
+            make_client("mock", responder=lambda _request: unclosed),
+            target_class=f"{NS}Pizza",
+            condition=condition,
+            n_individuals=1,
+            seed=2,
+            model="mock-1",
+        )
+        flags.append((record.strict_parse_ok, record.lenient_parse_ok, record.n_individuals))
+    assert flags == [(False, True, 1), (False, True, 1)]

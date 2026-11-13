@@ -1,0 +1,5 @@
+# Violates Pizza owl:disjointWith PizzaTopping.
+@prefix pz: <https://raw.githubusercontent.com/owlcs/pizza-ontology/refs/heads/master/pizza.owl#> .
+@prefix ex: <http://ollab.local/fixture/pizza/> .
+
+ex:both a pz:Pizza, pz:PizzaTopping .

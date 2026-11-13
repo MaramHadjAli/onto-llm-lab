@@ -1,0 +1,19 @@
+# Wine individual that meets the asserted exactly-1 and min-1 restrictions
+# with one value each, and explicit domain and range types.
+# SHACL is built from wine.owl only (imports are not merged). HermiT also loads food.owl.
+@prefix wine: <http://www.w3.org/TR/2003/PR-owl-guide-20031209/wine#> .
+@prefix ex: <http://ollab.local/fixture/wine/> .
+
+ex:bottle a wine:Wine ;
+    wine:hasColor ex:color ;
+    wine:hasBody ex:body ;
+    wine:hasFlavor ex:flavor ;
+    wine:hasSugar ex:sugar ;
+    wine:hasMaker ex:maker ;
+    wine:madeFromGrape ex:grape .
+ex:color a wine:WineColor .
+ex:body a wine:WineBody .
+ex:flavor a wine:WineFlavor .
+ex:sugar a wine:WineSugar .
+ex:maker a wine:Winery .
+ex:grape a wine:WineGrape .
