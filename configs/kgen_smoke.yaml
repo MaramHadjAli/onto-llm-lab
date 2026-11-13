@@ -1,3 +1,5 @@
+# The file named below is pipeline smoke only; model too small; not usable for any claim.
+# Do not cite it in the README or the report.
 ontology: data/ontologies/pizza.owl
 n_classes: 2
 n_individuals: 3

@@ -69,9 +69,13 @@ uv run ollab kgen run --config configs/kgen_smoke.yaml --dry-run
 
 `ollab kgen run` with the smoke config calls the provider named in the file and writes `results/kgen_smoke.json`. A mock provider is refused for any path under `results/` unless `--dry-run` is set. Every written record includes the provider, model, seed, and prompt hash.
 
+`results/kgen_smoke.json` is pipeline smoke only; model too small; not usable for any claim. Do not cite that file in this README or in the report.
+
 Phase 1 uses Java 17 for HermiT through owlready2. Owlready2 resolves `owl:imports` from the ontology directory (`onto_path`) and the loader asks for local files only. The Docker image is not required before Phase 6.
 
 HermiT checks consistency of an ontology plus generated individuals. SHACL shapes cover domain, range, cardinality, functional properties, and disjoint classes; the mapping and its limits are in `docs/shacl_mapping.md`. A0 prompts contain names only. A1 adds verbalised axioms.
+
+A0 and A1 use the same output step. `strict_parse_ok` is true when the raw completion parses as Turtle. `lenient_parse_ok` is true after `extract_turtle`. That function strips one markdown fence, including an unclosed fence, and keeps the first Turtle block: the first block tagged `turtle` or `ttl`, or the first fence if neither tag is present. Text before that fence is discarded. No prefix is added, no punctuation is inserted, and no IRI is rewritten. Validation runs on the lenient graph. `parse_error` is the lenient parse error.
 
 ## Cache and cost
 
