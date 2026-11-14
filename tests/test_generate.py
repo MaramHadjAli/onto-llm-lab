@@ -354,3 +354,30 @@ def test_prefix_completion_parse_metrics() -> None:
     assert prose.n_individuals == 0
     assert prose.n_type_triples == 0
     assert prose.n_property_triples == 0
+
+
+def test_v3_removes_only_the_seed_line() -> None:
+    ontology = load_ontology(ONTOLOGIES / "pizza.owl")
+    target = _PIZZA + "PizzaBase"
+    v1 = build_prompt(
+        ontology, target, condition="A0", n_individuals=3, seed=0, prompt_version="v1"
+    )
+    v2 = build_prompt(
+        ontology, target, condition="A0", n_individuals=3, seed=0, prompt_version="v2"
+    )
+    v3 = build_prompt(
+        ontology, target, condition="A0", n_individuals=3, seed=0, prompt_version="v3"
+    )
+    other = build_prompt(
+        ontology, target, condition="A0", n_individuals=3, seed=1, prompt_version="v3"
+    )
+    assert v2.count("\nSeed: 0\n") == 1
+    assert "\nSeed: 0\n" in v1
+    assert v2.replace("\nSeed: 0\n", "\n", 1) == v3
+    assert "Seed:" not in v3
+    assert "http://ollab.local/gen/0/PizzaBase/" in v3
+    assert "http://ollab.local/gen/1/PizzaBase/" in other
+    assert v3 != other
+    assert hash_prompt(LLMRequest(model="qwen2.5:7b", prompt=v3, prompt_version="v3")) != (
+        hash_prompt(LLMRequest(model="qwen2.5:7b", prompt=v2, prompt_version="v2"))
+    )

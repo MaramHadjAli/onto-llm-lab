@@ -244,8 +244,35 @@ def test_ollama_maps_eval_counts() -> None:
     assert response.completion_tokens == 1
     assert response.prompt_eval_count == 4
     assert response.eval_count == 1
+    assert response.done_reason is None
     assert response.usage_source == "provider"
     assert response.text == "ok"
+
+
+def test_ollama_records_a_length_stop() -> None:
+    transport = ScriptedTransport(
+        [
+            httpx.Response(
+                200,
+                json={
+                    "model": "llama",
+                    "message": {"role": "assistant", "content": "ok"},
+                    "prompt_eval_count": 4,
+                    "eval_count": 8,
+                    "done_reason": "length",
+                },
+            )
+        ]
+    )
+    client = make_client(
+        "ollama",
+        base_url="http://127.0.0.1:11434",
+        transport=transport,
+        max_attempts=1,
+    )
+    response = client.complete(_request(model="llama", max_tokens=8))
+    assert response.done_reason == "length"
+    assert response.eval_count == 8
 
 
 def test_ollama_rejects_a_prompt_that_fills_the_context_window(tmp_path: Path) -> None:
