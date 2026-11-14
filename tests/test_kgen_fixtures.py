@@ -5,9 +5,9 @@ unsatisfiable class that the ontology does not already report on its own.
 SHACL flags it when ``conforms`` is false. The undefined-term detector flags
 an IRI that ``undefined_terms`` returns.
 
-Wine class IRIs loaded by owlready2 use a doubled hash
-(``wine##LateHarvest``). The fixtures use the single-hash IRIs from the RDF
-file. HermiT therefore does not see the Wine fixture types.
+Wine and Food declare ``xml:base`` with a trailing ``#``. The HermiT loader
+strips that character from the in-memory stream, so class IRIs stay
+``ns#Name`` and match the fixture types. The files on disk are unchanged.
 """
 
 from pathlib import Path
@@ -18,7 +18,7 @@ from rdflib import Graph
 from ollab.core.ontology import load_ontology
 from ollab.kgen.generate import undefined_terms
 from ollab.kgen.shapes import build_shapes
-from ollab.kgen.validate_owl import check_consistency, load_local_world
+from ollab.kgen.validate_owl import _add_individuals, check_consistency, load_local_world
 from ollab.kgen.validate_shacl import validate_shacl
 from tests.support import ONTOLOGIES
 
@@ -35,7 +35,7 @@ EXPECTED = {
     ("pizza", "functional"): frozenset({"SHACL"}),
     ("pizza", "undefined"): frozenset({"undefined-term"}),
     ("wine", "valid"): frozenset(),
-    ("wine", "disjoint"): frozenset({"SHACL"}),
+    ("wine", "disjoint"): frozenset({"HermiT", "SHACL"}),
     ("wine", "cardinality"): frozenset({"SHACL"}),
     ("wine", "undefined"): frozenset({"undefined-term"}),
 }
@@ -119,7 +119,7 @@ def test_disjoint_and_count_messages_name_the_broken_constraint(reports) -> None
     assert all("hasSpiciness" in message for _who, message in pizza_functional["shacl"])
 
     wine_disjoint = reports[("wine", "disjoint")]
-    assert wine_disjoint["hermit_consistent"] is True
+    assert wine_disjoint["hermit_consistent"] is False
     assert wine_disjoint["shacl"]
     assert all("disjoint" in message for _who, message in wine_disjoint["shacl"])
     for _who, message in wine_disjoint["shacl"]:
@@ -142,9 +142,24 @@ def test_undefined_iri_is_only_the_invented_predicate(reports) -> None:
         assert report["hermit_consistent"] is True
 
 
-def test_hermit_wine_class_iri_has_a_doubled_hash() -> None:
+def test_wine_class_iris_keep_a_single_hash_and_valid_types_attach() -> None:
     world = load_local_world(WINE)
     iris = {cls.iri for cls in world.classes() if isinstance(getattr(cls, "iri", None), str)}
-    doubled = f"{WINE_NS[:-1]}##LateHarvest"
-    assert doubled in iris
-    assert f"{WINE_NS}LateHarvest" not in iris
+    assert f"{WINE_NS}LateHarvest" in iris
+    assert f"{WINE_NS[:-1]}##LateHarvest" not in iris
+    assert all("##" not in iri for iri in iris)
+    _add_individuals(world, (FIXTURES / "wine_valid.ttl").read_text(encoding="utf-8"))
+    bottle = "http://ollab.local/fixture/wine/bottle"
+    found = world.search(iri=bottle)
+    assert len(found) == 1
+    assert found[0].iri == bottle
+    classes = {
+        cls.iri: cls for cls in world.classes() if isinstance(getattr(cls, "iri", None), str)
+    }
+    assert classes[f"{WINE_NS}Wine"] in found[0].is_a
+    valid = check_consistency(WINE, (FIXTURES / "wine_valid.ttl").read_text(encoding="utf-8"))
+    disjoint = check_consistency(WINE, (FIXTURES / "wine_disjoint.ttl").read_text(encoding="utf-8"))
+    assert valid.error is None
+    assert valid.consistent is True
+    assert disjoint.error is None
+    assert disjoint.consistent is False

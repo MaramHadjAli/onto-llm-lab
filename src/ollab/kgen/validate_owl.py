@@ -8,13 +8,16 @@ its ontology uses ``rdf:about=""``, and owlready2 stores the import on a
 different node, so HermiT would not see Food if we relied on owlready2's
 import list. No URL is opened.
 
-rdflib parsing elsewhere does not follow ``owl:imports``. HermiT does, through
-this catalog.
+Owlready2 also opens an import from ``onto_path`` while loading the parent.
+That read sees the raw file, so an import that is already loaded is parsed
+again from the corrected stream. rdflib parsing elsewhere does not follow
+``owl:imports``. HermiT does, through this catalog.
 """
 
 from __future__ import annotations
 
 import io
+import re
 from collections.abc import Sequence
 from contextlib import contextmanager
 from pathlib import Path
@@ -27,6 +30,12 @@ from ollab.core.ontology import load_ontology
 
 _NOTHING = "http://www.w3.org/2002/07/owl#Nothing"
 _ERROR_LIMIT = 4000
+# owlready2 joins xml:base and "#Name" by concatenation. A base that already
+# ends in "#" becomes "ns##Name". The attribute value loses that final "#";
+# the file on disk is not edited.
+_XML_BASE_TRAILING_HASH = re.compile(
+    rb"""(?P<attr>xml:base\s*=\s*)(?P<quote>["'])(?P<body>[^"']*)#(?P=quote)"""
+)
 
 
 class ConsistencyReport(BaseModel):
@@ -112,27 +121,59 @@ def check_consistency(
 
 
 def _load_file(world: World, source: Path, directories: Sequence[Path], seen: set[Path]) -> None:
-    """Load one file, then every ``owl:imports`` target found on disk."""
+    """Load one file, then every ``owl:imports`` target found on disk.
+
+    ``Ontology.load`` also reads imports from ``onto_path`` by itself, using
+    the raw file. For Wine that happens before this function reaches Food, so
+    Food is already loaded with the doubled-hash IRIs. Passing ``reload``
+    replaces that graph with the corrected stream. A later import of a file
+    this function has already loaded is left as it is.
+    """
     resolved = source.resolve()
     if resolved in seen:
         return
     seen.add(resolved)
     header = load_ontology(resolved)
     iri = header.iri or f"http://ollab.local/file/{resolved.stem}"
-    world.get_ontology(iri).load(fileobj=_owlready_stream(resolved), only_local=True)
+    onto = world.get_ontology(iri)
+    onto.load(
+        fileobj=_owlready_stream(resolved),
+        only_local=True,
+        reload=onto.loaded,
+    )
     for imported in header.imports:
         _load_file(world, _find_import(imported, directories), directories, seen)
 
 
 def _owlready_stream(source: Path) -> io.BytesIO:
-    """Return RDF/XML bytes. Turtle fixtures are converted; OWL/RDF files are not rewritten."""
+    """Return RDF/XML bytes for owlready2.
+
+    Turtle fixtures are serialized to RDF/XML. OWL and RDF files keep their
+    original bytes except for one in-memory edit: a trailing ``#`` on
+    ``xml:base`` is removed. Owlready2 resolves ``rdf:ID="Name"`` and
+    ``rdf:about="#Name"`` by appending ``#Name`` to ``xml:base``. Wine and
+    Food use an ``xml:base`` that already ends in ``#``, so the parser stores
+    ``ns##Name``. rdflib, following RFC 3986, replaces the fragment and stores
+    ``ns#Name``. The vendored file is not modified.
+    """
     if source.suffix.lower() in {".ttl", ".turtle"}:
         graph = Graph()
         graph.parse(source, format="turtle")
         payload = graph.serialize(format="xml")
         raw = payload.encode("utf-8") if isinstance(payload, str) else payload
-        return io.BytesIO(raw)
-    return io.BytesIO(source.read_bytes())
+    else:
+        raw = source.read_bytes()
+    return io.BytesIO(_strip_xml_base_hash(raw))
+
+
+def _strip_xml_base_hash(raw: bytes) -> bytes:
+    """Drop a final ``#`` from each ``xml:base`` value in an RDF/XML document."""
+
+    def _replace(match: re.Match[bytes]) -> bytes:
+        quote = match.group("quote")
+        return match.group("attr") + quote + match.group("body") + quote
+
+    return _XML_BASE_TRAILING_HASH.sub(_replace, raw)
 
 
 def _find_import(iri: str, directories: Sequence[Path]) -> Path:
