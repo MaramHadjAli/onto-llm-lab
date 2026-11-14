@@ -231,10 +231,54 @@ def test_ollama_maps_eval_counts() -> None:
     assert body["stream"] is False
     assert body["options"]["seed"] == 7
     assert body["options"]["num_predict"] == 512
+    assert body["options"]["num_ctx"] == 16384
     assert response.prompt_tokens == 4
     assert response.completion_tokens == 1
+    assert response.prompt_eval_count == 4
+    assert response.eval_count == 1
     assert response.usage_source == "provider"
     assert response.text == "ok"
+
+
+def test_ollama_rejects_a_prompt_that_fills_the_context_window(tmp_path: Path) -> None:
+    def payload(prompt_eval_count: int) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "model": "llama",
+                "message": {"role": "assistant", "content": "ok"},
+                "prompt_eval_count": prompt_eval_count,
+                "eval_count": 2,
+            },
+        )
+
+    under = ScriptedTransport([payload(89)])
+    client = make_client(
+        "ollama",
+        base_url="http://127.0.0.1:11434",
+        transport=under,
+        max_attempts=1,
+        num_ctx=100,
+    )
+    response = client.complete(_request(model="llama"))
+    body = json.loads(under.requests[0].content.decode("utf-8"))
+    assert body["options"]["num_ctx"] == 100
+    assert response.prompt_eval_count == 89
+    assert response.eval_count == 2
+
+    cache = tmp_path / "cache"
+    over = ScriptedTransport([payload(90)])
+    failing = make_client(
+        "ollama",
+        base_url="http://127.0.0.1:11434",
+        transport=over,
+        max_attempts=1,
+        num_ctx=100,
+        cache_dir=cache,
+    )
+    with pytest.raises(LLMClientError, match="prompt_eval_count 90 >= 0.9 \\* num_ctx 100"):
+        failing.complete(_request(model="llama"))
+    assert list(cache.rglob("*.json")) == []
 
 
 def test_missing_api_key_and_unknown_provider() -> None:
