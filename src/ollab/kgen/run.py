@@ -1,26 +1,24 @@
-"""Run an A0/A1 generation config and optionally validate each Turtle graph."""
+"""Run an A0/A1/A2 generation config and validate each Turtle graph."""
 
 from __future__ import annotations
 
 import json
 import os
+import time
 from pathlib import Path
+from typing import Self
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+from rdflib import Graph
 
 from ollab.core.llm import LLMClient, make_client
 from ollab.core.ontology import load_ontology
-from ollab.kgen.generate import (
-    Condition,
-    GenerationRecord,
-    PromptVersion,
-    generate_individuals,
-    select_classes,
-)
+from ollab.kgen.generate import PromptVersion, generate_individuals, select_classes
+from ollab.kgen.records import RunOutput, RunRecord
+from ollab.kgen.repair import assess_generation, run_a2
 from ollab.kgen.shapes import build_shapes
-from ollab.kgen.validate_owl import ConsistencyReport, check_consistency
-from ollab.kgen.validate_shacl import ShaclViolation, validate_shacl
+from ollab.kgen.validate_owl import check_consistency
 
 
 class SafetyError(RuntimeError):
@@ -28,49 +26,52 @@ class SafetyError(RuntimeError):
 
 
 class KgenConfig(BaseModel):
-    """Experiment settings read from a YAML file. Paths are relative to the cwd."""
+    """Experiment settings read from a YAML file. Paths are relative to the cwd.
+
+    Set ``ontology`` for one file, or ``ontologies`` for several. A2 is allowed
+    only when A1 is listed earlier and validation is on, so round 0 can reuse
+    the A1 completion and the repair loop can see HermiT and SHACL.
+    """
 
     model_config = ConfigDict(frozen=True, populate_by_name=True)
 
-    ontology: Path
+    ontology: Path | None = None
+    ontologies: list[Path] = Field(default_factory=list)
     n_classes: int
     n_individuals: int
     seeds: list[int]
     class_seed: int = 0
-    conditions: list[Condition]
+    conditions: list[str]
     provider: str
     model: str
     temperature: float = 0.0
     max_tokens: int = 1024
     num_ctx: int = Field(default=16384, gt=0)
+    timeout_s: float = 120.0
     prompt_version: PromptVersion = "v2"
+    max_repair_rounds: int = Field(default=3, ge=0, le=3)
     output: Path = Path("results/kgen_smoke.json")
     base_url: str | None = None
     check: bool = Field(default=True, alias="validate")
 
-
-class RunRecord(BaseModel):
-    """A generation record plus the validation reports for that Turtle graph."""
-
-    model_config = ConfigDict(frozen=True)
-
-    generation: GenerationRecord
-    consistency: ConsistencyReport | None = None
-    shacl_conforms: bool | None = None
-    shacl_violations: tuple[ShaclViolation, ...] = ()
-
-
-class RunOutput(BaseModel):
-    """The JSON document written by ``ollab kgen run``."""
-
-    model_config = ConfigDict(frozen=True)
-
-    provider: str
-    model: str
-    ontology: str
-    class_seed: int
-    target_classes: tuple[str, ...]
-    records: tuple[RunRecord, ...] = Field(default_factory=tuple)
+    @model_validator(mode="after")
+    def _protocol(self) -> Self:
+        has_one = self.ontology is not None
+        has_many = bool(self.ontologies)
+        if has_one == has_many:
+            raise ValueError("set exactly one of ontology or ontologies")
+        allowed = {"A0", "A1", "A2"}
+        unknown = [item for item in self.conditions if item not in allowed]
+        if unknown:
+            raise ValueError(f"unknown conditions: {', '.join(unknown)}")
+        if "A2" in self.conditions:
+            if "A1" not in self.conditions or self.conditions.index("A1") > self.conditions.index(
+                "A2"
+            ):
+                raise ValueError("A1 must appear before A2 in conditions")
+            if not self.check:
+                raise ValueError("A2 requires validate: true")
+        return self
 
 
 def load_config(path: Path) -> KgenConfig:
@@ -99,11 +100,13 @@ def execute(
     client: LLMClient | None = None,
     cwd: Path | None = None,
 ) -> RunOutput:
-    """Generate individuals for every class, seed, and condition.
+    """Generate individuals for every class, seed, and condition of one ontology.
 
     A mock provider may not write under ``results/`` unless ``dry_run`` is set.
     ``dry_run`` returns the document and does not create the output file.
     """
+    if config.ontology is None:
+        raise ValueError("execute() needs config.ontology; use execute_suite() for several")
     if config.provider == "mock" and not dry_run and is_results_path(config.output, cwd=cwd):
         raise SafetyError(
             "refusing to write mock output into results/; pass --dry-run or use a non-mock provider"
@@ -111,23 +114,46 @@ def execute(
     ontology_path = _resolve(config.ontology, cwd)
     ontology = load_ontology(ontology_path)
     classes = select_classes(ontology, config.n_classes, config.class_seed)
-    llm = client or make_client(
-        config.provider,
-        base_url=config.base_url,
-        cache_dir=_cache_dir(cwd),
-        num_ctx=config.num_ctx,
-    )
-    shapes = build_shapes(ontology).graph if config.check else None
+    llm = client or _make(config, cwd)
+    shapes: Graph | None = None
+    baseline = None
+    baseline_elapsed = None
+    if config.check:
+        started = time.perf_counter()
+        baseline = check_consistency(ontology_path)
+        baseline_elapsed = time.perf_counter() - started
+        shapes = build_shapes(ontology).graph
     records: list[RunRecord] = []
     for seed in config.seeds:
         for condition in config.conditions:
             for target in classes:
+                if condition == "A2":
+                    records.append(
+                        run_a2(
+                            ontology,
+                            ontology_path,
+                            llm,
+                            target_class=target,
+                            n_individuals=config.n_individuals,
+                            seed=seed,
+                            model=config.model,
+                            temperature=config.temperature,
+                            max_tokens=config.max_tokens,
+                            prompt_version=config.prompt_version,
+                            max_repair_rounds=config.max_repair_rounds,
+                            shapes=shapes,
+                            baseline=baseline,
+                            check=config.check,
+                            require_cache_hit=True,
+                        )
+                    )
+                    continue
                 generated = generate_individuals(
                     ontology,
                     str(ontology_path),
                     llm,
                     target_class=target,
-                    condition=condition,
+                    condition=condition,  # type: ignore[arg-type]
                     n_individuals=config.n_individuals,
                     seed=seed,
                     model=config.model,
@@ -135,21 +161,29 @@ def execute(
                     max_tokens=config.max_tokens,
                     prompt_version=config.prompt_version,
                 )
-                consistency = None
-                conforms: bool | None = None
-                violations: tuple[ShaclViolation, ...] = ()
-                if config.check and generated.prefix_completed_parse_ok and generated.turtle:
-                    consistency = check_consistency(ontology_path, generated.turtle)
-                    if shapes is not None:
-                        conforms, violations = validate_shacl(
-                            ontology_path, generated.turtle, shapes
-                        )
+                metrics, consistency, conforms, violations, elapsed, clean = assess_generation(
+                    ontology,
+                    ontology_path,
+                    generated,
+                    shapes=shapes,
+                    baseline=baseline,
+                    check=config.check,
+                )
+                round_record = _round(
+                    generated, metrics, consistency, conforms, violations, elapsed, clean
+                )
                 records.append(
                     RunRecord(
+                        condition=condition,  # type: ignore[arg-type]
                         generation=generated,
+                        metrics=metrics,
                         consistency=consistency,
                         shacl_conforms=conforms,
-                        shacl_violations=violations,
+                        shacl_violations=violations or (),
+                        rounds=(round_record,),
+                        n_repair_rounds=0,
+                        round0_cached=generated.cached,
+                        stopped="single",
                     )
                 )
     return RunOutput(
@@ -158,8 +192,45 @@ def execute(
         ontology=str(ontology_path),
         class_seed=config.class_seed,
         target_classes=classes,
+        temperature=config.temperature,
+        prompt_version=config.prompt_version,
+        n_individuals=config.n_individuals,
+        max_tokens=config.max_tokens,
+        num_ctx=config.num_ctx,
+        seeds=tuple(config.seeds),
+        baseline_consistent=None if baseline is None else baseline.consistent,
+        baseline_unsatisfiable_classes=() if baseline is None else baseline.unsatisfiable_classes,
+        baseline_error=None if baseline is None else baseline.error,
+        baseline_elapsed_s=baseline_elapsed,
         records=tuple(records),
     )
+
+
+def execute_suite(
+    config: KgenConfig,
+    *,
+    dry_run: bool = False,
+    client: LLMClient | None = None,
+    cwd: Path | None = None,
+) -> tuple[tuple[RunOutput, ...], dict[str, object]]:
+    """Run every ontology in the config with one shared LLM cache."""
+    if config.provider == "mock" and not dry_run and is_results_path(config.output, cwd=cwd):
+        raise SafetyError(
+            "refusing to write mock output into results/; pass --dry-run or use a non-mock provider"
+        )
+    paths = tuple(config.ontologies) if config.ontologies else (config.ontology,)
+    llm = client or _make(config, cwd)
+    started = time.perf_counter()
+    documents = []
+    for path in paths:
+        if path is None:
+            continue
+        one = config.model_copy(update={"ontology": path, "ontologies": []})
+        documents.append(execute(one, dry_run=True, client=llm, cwd=cwd))
+    wall_clock_s = time.perf_counter() - started
+    from ollab.kgen.summarize import summarize
+
+    return tuple(documents), summarize(documents, wall_clock_s=wall_clock_s)
 
 
 def write_output(path: Path, document: RunOutput, *, cwd: Path | None = None) -> Path:
@@ -168,6 +239,49 @@ def write_output(path: Path, document: RunOutput, *, cwd: Path | None = None) ->
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text(dump_document(document), encoding="utf-8")
     return destination
+
+
+def write_suite(
+    directory: Path,
+    documents: tuple[RunOutput, ...],
+    summary: dict[str, object],
+    *,
+    cwd: Path | None = None,
+) -> Path:
+    """Write one JSON file per ontology plus ``summary.json``."""
+    destination = _resolve(directory, cwd)
+    destination.mkdir(parents=True, exist_ok=True)
+    for document in documents:
+        stem = Path(document.ontology).stem
+        (destination / f"{stem}.json").write_text(dump_document(document), encoding="utf-8")
+    (destination / "summary.json").write_text(_dump_summary(summary), encoding="utf-8")
+    return destination
+
+
+def _round(generated, metrics, consistency, conforms, violations, elapsed, clean):
+    from ollab.kgen.records import RoundRecord
+
+    return RoundRecord(
+        round_index=0,
+        generation=generated,
+        metrics=metrics,
+        consistency=consistency,
+        shacl_conforms=conforms,
+        shacl_violations=violations or (),
+        clean=clean,
+        feedback=None,
+        validate_elapsed_s=elapsed,
+    )
+
+
+def _make(config: KgenConfig, cwd: Path | None) -> LLMClient:
+    return make_client(
+        config.provider,
+        base_url=config.base_url,
+        cache_dir=_cache_dir(cwd),
+        num_ctx=config.num_ctx,
+        timeout_s=config.timeout_s,
+    )
 
 
 def _cache_dir(cwd: Path | None) -> Path:
@@ -187,3 +301,7 @@ def _resolve(path: Path, cwd: Path | None) -> Path:
 def dump_document(document: RunOutput) -> str:
     """Return canonical JSON for stdout and for the results file."""
     return json.dumps(json.loads(document.model_dump_json()), indent=2, sort_keys=True) + "\n"
+
+
+def _dump_summary(summary: dict[str, object]) -> str:
+    return json.dumps(summary, indent=2, sort_keys=True) + "\n"
