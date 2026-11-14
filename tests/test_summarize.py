@@ -15,6 +15,7 @@ def _generation(
     *,
     seed: int = 0,
     cached: bool = False,
+    replicate_index: int = 0,
 ) -> GenerationRecord:
     return GenerationRecord(
         condition=condition,  # type: ignore[arg-type]
@@ -24,6 +25,7 @@ def _generation(
         model="mock-1",
         temperature=0.7,
         prompt_version="v3",
+        replicate_index=replicate_index,
         prompt_hash="h",
         strict_parse_ok=True,
         lenient_parse_ok=True,
@@ -77,8 +79,9 @@ def _record(
     parse_ok: bool,
     undefined: float | None,
     seed: int = 0,
+    replicate_index: int = 0,
 ) -> RunRecord:
-    generation = _generation(condition, target_class, seed=seed)
+    generation = _generation(condition, target_class, seed=seed, replicate_index=replicate_index)
     metrics = _metrics(parse_ok=parse_ok, undefined=undefined)
     return RunRecord(
         condition=condition,  # type: ignore[arg-type]
@@ -155,3 +158,27 @@ def test_two_generations_of_one_class_are_rejected() -> None:
         assert "more than one generation" in str(exc)
     else:
         raise AssertionError("expected ValueError")
+
+
+def test_a_second_replicate_is_not_a_second_class() -> None:
+    document = RunOutput(
+        provider="mock",
+        model="mock-1",
+        ontology="mini.ttl",
+        class_seed=0,
+        target_classes=(_PIZZA,),
+        seeds=(0,),
+        replicates=(0, 1),
+        records=(
+            _record("A0", _PIZZA, parse_ok=True, undefined=0.0, replicate_index=0),
+            _record("A0", _PIZZA, parse_ok=False, undefined=None, replicate_index=1),
+        ),
+    )
+    summary = summarize((document,), wall_clock_s=1.0)
+    assert summary["n_units"] == 1
+    assert summary["pooled"]["A0"]["parse_ok"]["estimate"] == 1.0
+    assert summary["per_unit"]["uncached_calls"] == 1.0
+    assert summary["totals"]["uncached_calls"] == 2
+    by_replicate = summary["by_replicate"]
+    assert by_replicate["1"]["n_units"] == 1
+    assert by_replicate["1"]["pooled"]["A0"]["parse_ok"]["estimate"] == 0.0

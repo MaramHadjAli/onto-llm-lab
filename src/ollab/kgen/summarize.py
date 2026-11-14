@@ -38,7 +38,7 @@ _METRICS = (
 def summarize(documents: Sequence[RunOutput], *, wall_clock_s: float) -> dict[str, object]:
     """Summarise one or more ontology documents from the same protocol."""
     table = _index(documents)
-    keys = sorted(table)
+    keys = _primary_keys(table)
     pooled = {
         condition: _condition_summary(table, keys, condition) for condition in ("A0", "A1", "A2")
     }
@@ -54,10 +54,11 @@ def summarize(documents: Sequence[RunOutput], *, wall_clock_s: float) -> dict[st
         }
     totals = _totals(documents)
     n_units = len(keys)
-    return {
+    primary_replicate = 0 if any(key[2] == 0 for key in table) else None
+    summary: dict[str, object] = {
         "ci_note": (
-            "Intervals are percentile bootstraps over target classes. "
-            "Comparisons are paired on the same class."
+            "Intervals are percentile bootstraps over target classes at "
+            "replicate_index 0. Other replicates are not extra classes."
         ),
         "method": {
             "confidence": _CONFIDENCE,
@@ -69,7 +70,10 @@ def summarize(documents: Sequence[RunOutput], *, wall_clock_s: float) -> dict[st
         "n_units": n_units,
         "paired": paired,
         "per_ontology": per_ontology,
-        "per_unit": _per_unit(totals, n_units),
+        "per_unit": _per_unit(
+            _totals(documents, replicate=primary_replicate),
+            n_units,
+        ),
         "pooled": pooled,
         "protocol": _protocol(documents),
         "repair_example": _repair_example(documents),
@@ -87,13 +91,23 @@ def summarize(documents: Sequence[RunOutput], *, wall_clock_s: float) -> dict[st
             "usd": None,
         },
     }
+    by_replicate = _by_replicate(table)
+    if by_replicate is not None:
+        summary["by_replicate"] = by_replicate
+    return summary
 
 
-def _index(documents: Sequence[RunOutput]) -> dict[tuple[str, str], dict[str, RunRecord]]:
-    table: dict[tuple[str, str], dict[str, RunRecord]] = {}
+def _index(
+    documents: Sequence[RunOutput],
+) -> dict[tuple[str, str, int], dict[str, RunRecord]]:
+    table: dict[tuple[str, str, int], dict[str, RunRecord]] = {}
     for document in documents:
         for record in document.records:
-            key = (document.ontology, record.generation.target_class)
+            key = (
+                document.ontology,
+                record.generation.target_class,
+                record.generation.replicate_index,
+            )
             slot = table.setdefault(key, {})
             if record.condition in slot:
                 raise ValueError(
@@ -104,9 +118,38 @@ def _index(documents: Sequence[RunOutput]) -> dict[tuple[str, str], dict[str, Ru
     return table
 
 
+def _primary_keys(
+    table: dict[tuple[str, str, int], dict[str, RunRecord]],
+) -> list[tuple[str, str, int]]:
+    """Replicate 0 is the published table. A run with no replicate 0 uses all rows."""
+    zeros = [key for key in sorted(table) if key[2] == 0]
+    if zeros:
+        return zeros
+    return sorted(table)
+
+
+def _by_replicate(
+    table: dict[tuple[str, str, int], dict[str, RunRecord]],
+) -> dict[str, object] | None:
+    indexes = sorted({key[2] for key in table})
+    if len(indexes) < 2:
+        return None
+    reported: dict[str, object] = {}
+    for replicate in indexes:
+        keys = [key for key in sorted(table) if key[2] == replicate]
+        reported[str(replicate)] = {
+            "n_units": len(keys),
+            "pooled": {
+                condition: _condition_summary(table, keys, condition)
+                for condition in ("A0", "A1", "A2")
+            },
+        }
+    return reported
+
+
 def _condition_summary(
-    table: dict[tuple[str, str], dict[str, RunRecord]],
-    keys: Sequence[tuple[str, str]],
+    table: dict[tuple[str, str, int], dict[str, RunRecord]],
+    keys: Sequence[tuple[str, str, int]],
     condition: str,
 ) -> dict[str, object]:
     records = [table[key][condition] for key in keys if condition in table[key]]
@@ -122,8 +165,8 @@ def _condition_summary(
 
 
 def _paired_summary(
-    table: dict[tuple[str, str], dict[str, RunRecord]],
-    keys: Sequence[tuple[str, str]],
+    table: dict[tuple[str, str, int], dict[str, RunRecord]],
+    keys: Sequence[tuple[str, str, int]],
     left: str,
     right: str,
 ) -> dict[str, object]:
@@ -212,7 +255,7 @@ def _uncached_sum(record: RunRecord, field: str) -> float | None:
     return total
 
 
-def _totals(documents: Sequence[RunOutput]) -> dict[str, object]:
+def _totals(documents: Sequence[RunOutput], *, replicate: int | None = None) -> dict[str, object]:
     uncached_calls = 0
     cached_calls = 0
     prompt = 0
@@ -226,6 +269,8 @@ def _totals(documents: Sequence[RunOutput]) -> dict[str, object]:
     a2_round0_cached = 0
     for document in documents:
         for record in document.records:
+            if replicate is not None and record.generation.replicate_index != replicate:
+                continue
             if record.condition == "A2" and record.rounds:
                 a2_round0 += 1
                 if record.rounds[0].generation.cached:
@@ -309,6 +354,7 @@ def _protocol(documents: Sequence[RunOutput]) -> dict[str, object]:
         "ontologies": [document.ontology for document in documents],
         "prompt_version": first.prompt_version,
         "provider": first.provider,
+        "replicates": list(first.replicates) if first.replicates else [0],
         "seeds": list(first.seeds),
         "target_classes": {
             document.ontology: list(document.target_classes) for document in documents
