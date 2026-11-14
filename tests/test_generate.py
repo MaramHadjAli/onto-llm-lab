@@ -1,5 +1,7 @@
 """A0/A1 prompts, Turtle parsing, and undefined terms. MockLLM only."""
 
+from pathlib import Path
+
 from ollab.core.llm import LLMRequest, make_client
 from ollab.core.ontology import load_ontology
 from ollab.core.verbalize import verbalize
@@ -8,9 +10,10 @@ from ollab.kgen.generate import (
     build_prompt,
     extract_turtle,
     generate_individuals,
+    prompt_labels,
     select_classes,
 )
-from tests.support import MINI
+from tests.support import MINI, ONTOLOGIES
 
 NS = "http://example.org/mini#"
 
@@ -30,18 +33,89 @@ def test_class_selection_is_deterministic() -> None:
 def test_a1_adds_verbalised_axioms_and_a0_does_not() -> None:
     ontology = load_ontology(MINI)
     target = f"{NS}CheesyPizza"
-    labels = ontology.labels()
+    labels = prompt_labels(ontology)
     sentence = next(
         verbalize(axiom, labels)
         for axiom in axioms_for_class(ontology, target)
-        if "Cheesy pizza" in verbalize(axiom, labels)
+        if "CheesyPizza" in verbalize(axiom, labels)
     )
     a0 = build_prompt(ontology, target, condition="A0", n_individuals=3, seed=0)
     a1 = build_prompt(ontology, target, condition="A1", n_individuals=3, seed=0)
     assert "Axioms:" not in a0
     assert sentence not in a0
     assert sentence in a1
-    assert "Cheesy pizza" in a0
+    assert a1.startswith(a0)
+    assert a1[len(a0) :].startswith("\nAxioms:\n")
+    assert "Cheesy pizza" not in a0
+    assert ":CheesyPizza" in a0
+
+
+def test_prompt_uses_english_labels_curies_and_declared_prefixes() -> None:
+    ontology = load_ontology(MINI)
+    target = f"{NS}NamedPizza"
+    prompt = build_prompt(ontology, target, condition="A0", n_individuals=3, seed=0)
+    assert prompt.startswith("@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .\n")
+    assert "@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> ." in prompt
+    assert "@prefix owl: <http://www.w3.org/2002/07/owl#> ." in prompt
+    assert "@prefix xsd: <http://www.w3.org/2001/XMLSchema#> ." in prompt
+    assert f"@prefix : <{NS}> ." in prompt
+    assert "@prefix ind: <http://ollab.local/gen/0/NamedPizza/> ." in prompt
+    assert "Named pizza" in prompt
+    assert "Pizza nomeada" not in prompt
+    assert "Individual IRI pattern: ind:N" in prompt
+    classes = prompt.split("Classes:\n", 1)[1].split("\nProperties:", 1)[0]
+    properties = prompt.split("Properties:\n", 1)[1]
+    assert "<" not in classes
+    assert "<" not in properties
+    assert ":NamedPizza" in classes
+    assert ":hasTopping" in properties
+
+
+def test_colliding_labels_fall_back_to_local_names(tmp_path: Path) -> None:
+    path = tmp_path / "collision.ttl"
+    path.write_text(
+        "\n".join(
+            [
+                "@prefix : <http://example.org/col#> .",
+                "@prefix owl: <http://www.w3.org/2002/07/owl#> .",
+                "@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .",
+                "<http://example.org/col> a owl:Ontology .",
+                ':Alpha a owl:Class ; rdfs:label "Same"@en .',
+                ':Beta a owl:Class ; rdfs:label "Same"@en .',
+                ':Gamma a owl:Class ; rdfs:label "Outro"@pt .',
+                ':Delta a owl:Class ; rdfs:label "British name"@en-GB .',
+            ]
+        ),
+        encoding="utf-8",
+    )
+    ontology = load_ontology(path)
+    prompt = build_prompt(
+        ontology,
+        "http://example.org/col#Alpha",
+        condition="A0",
+        n_individuals=1,
+        seed=0,
+    )
+    assert "Same" not in prompt
+    assert "Outro" not in prompt
+    assert "British name" in prompt
+    assert "- Alpha :Alpha" in prompt
+    assert "- Beta :Beta" in prompt
+    assert "- Gamma :Gamma" in prompt
+
+
+def test_pizza_prompt_hides_non_english_labels() -> None:
+    ontology = load_ontology(ONTOLOGIES / "pizza.owl")
+    base = "https://raw.githubusercontent.com/owlcs/pizza-ontology/refs/heads/master/pizza.owl#"
+    target = base + "PizzaBase"
+    a0 = build_prompt(ontology, target, condition="A0", n_individuals=3, seed=0)
+    a1 = build_prompt(ontology, target, condition="A1", n_individuals=3, seed=0)
+    assert "BaseDaPizza" not in a0
+    assert "CoberturaDeQueijo" not in a0
+    assert "- PizzaBase :PizzaBase" in a0
+    assert f"@prefix : <{base}> ." in a0
+    assert a1.startswith(a0)
+    assert "\nAxioms:\n" in a1[len(a0) :]
 
 
 def test_parse_failure_is_counted() -> None:

@@ -36,6 +36,7 @@ class KgenConfig(BaseModel):
     model: str
     temperature: float = 0.0
     max_tokens: int = 1024
+    num_ctx: int = Field(default=16384, gt=0)
     output: Path = Path("results/kgen_smoke.json")
     base_url: str | None = None
     check: bool = Field(default=True, alias="validate")
@@ -107,6 +108,7 @@ def execute(
         config.provider,
         base_url=config.base_url,
         cache_dir=_cache_dir(cwd),
+        num_ctx=config.num_ctx,
     )
     shapes = build_shapes(ontology).graph if config.check else None
     records: list[RunRecord] = []
