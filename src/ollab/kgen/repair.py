@@ -7,6 +7,7 @@ under the rule in ``docs/metrics.md``.
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 from rdflib import Graph
@@ -185,8 +186,15 @@ def run_a2(
     baseline: ConsistencyReport | None,
     check: bool,
     require_cache_hit: bool,
+    replicate_index: int = 0,
+    on_completion: Callable[..., None] | None = None,
 ) -> RunRecord:
-    """Run A2 for one unit. Round 0 calls the A1 request so the cache can hit."""
+    """Run A2 for one unit. Round 0 calls the A1 request so the cache can hit.
+
+    ``on_completion`` receives each round's generation and its round index,
+    including the cached round 0. ``replicate_index`` is the same value the
+    A1 call used, so the cache key matches. It is not written into the prompt.
+    """
     if max_repair_rounds < 0 or max_repair_rounds > 3:
         raise ValueError("max_repair_rounds must be from 0 to 3")
     a1_prompt = build_prompt(
@@ -209,6 +217,7 @@ def run_a2(
         temperature=temperature,
         max_tokens=max_tokens,
         prompt_version=prompt_version,
+        replicate_index=replicate_index,
     )
     if require_cache_hit and not initial.cached:
         raise RepairError(
@@ -219,6 +228,8 @@ def run_a2(
     rounds: list[RoundRecord] = []
     index = 0
     while True:
+        if on_completion is not None:
+            on_completion(current, index)
         metrics, consistency, conforms, violations, elapsed, clean = assess_generation(
             ontology,
             ontology_path,
@@ -265,6 +276,7 @@ def run_a2(
             temperature=temperature,
             max_tokens=max_tokens,
             prompt_version=prompt_version,
+            replicate_index=replicate_index,
         )
         index += 1
     last = rounds[-1]

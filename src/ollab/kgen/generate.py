@@ -87,6 +87,7 @@ class GenerationRecord(BaseModel):
     model: str
     temperature: float
     prompt_version: PromptVersion = "v2"
+    replicate_index: int = 0
     prompt_hash: str
     strict_parse_ok: bool
     lenient_parse_ok: bool
@@ -216,6 +217,7 @@ def generate_individuals(
     temperature: float = 0.0,
     max_tokens: int = 1024,
     prompt_version: PromptVersion = "v2",
+    replicate_index: int = 0,
 ) -> GenerationRecord:
     """Call the shared LLM client once and score the Turtle it returns.
 
@@ -244,6 +246,7 @@ def generate_individuals(
         temperature=temperature,
         max_tokens=max_tokens,
         prompt_version=prompt_version,
+        replicate_index=replicate_index,
     )
 
 
@@ -260,11 +263,14 @@ def complete_prompt(
     temperature: float,
     max_tokens: int,
     prompt_version: PromptVersion,
+    replicate_index: int = 0,
 ) -> GenerationRecord:
     """Complete ``prompt`` and parse it the same way as a generation call.
 
     Repair rounds use this with the A2 repair prompt. The prefix block still
     comes from the target class and the seed, not from the completion.
+    ``replicate_index`` is stored on the request and the record. It is not
+    written into ``prompt``.
     """
     _require_prompt_version(prompt_version)
     started = time.perf_counter()
@@ -275,11 +281,55 @@ def complete_prompt(
             prompt_version=prompt_version,
             temperature=temperature,
             seed=seed,
+            replicate_index=replicate_index,
             max_tokens=max_tokens,
         )
     )
     elapsed = time.perf_counter() - started
-    raw = response.text
+    return record_from_completion(
+        ontology,
+        raw_text=response.text,
+        condition=condition,
+        target_class=target_class,
+        n_individuals=n_individuals,
+        seed=seed,
+        model=response.model,
+        provider=response.provider,
+        temperature=temperature,
+        prompt_version=prompt_version,
+        prompt_hash=response.prompt_hash,
+        replicate_index=replicate_index,
+        prompt_eval_count=response.prompt_eval_count,
+        eval_count=response.eval_count,
+        done_reason=response.done_reason,
+        cached=response.cached,
+        llm_elapsed_s=elapsed,
+    )
+
+
+def record_from_completion(
+    ontology: Ontology,
+    *,
+    raw_text: str,
+    condition: Condition,
+    target_class: str,
+    n_individuals: int,
+    seed: int,
+    model: str,
+    provider: str,
+    temperature: float,
+    prompt_version: PromptVersion,
+    prompt_hash: str,
+    replicate_index: int = 0,
+    prompt_eval_count: int | None = None,
+    eval_count: int | None = None,
+    done_reason: str | None = None,
+    cached: bool = False,
+    llm_elapsed_s: float | None = None,
+) -> GenerationRecord:
+    """Parse one archived completion. This does not call a model."""
+    _require_prompt_version(prompt_version)
+    raw = raw_text
     _, strict_error, _ = _parse_graph(raw)
     extracted = extract_turtle(raw)
     _, lenient_error, _ = _parse_graph(extracted)
@@ -298,11 +348,12 @@ def complete_prompt(
         condition=condition,
         seed=seed,
         target_class=target_class,
-        provider=response.provider,
-        model=response.model,
+        provider=provider,
+        model=model,
         temperature=temperature,
         prompt_version=prompt_version,
-        prompt_hash=response.prompt_hash,
+        replicate_index=replicate_index,
+        prompt_hash=prompt_hash,
         strict_parse_ok=strict_error is None,
         lenient_parse_ok=lenient_error is None,
         prefix_completed_parse_ok=completed_error is None,
@@ -314,12 +365,12 @@ def complete_prompt(
         undefined_terms=undefined,
         turtle=turtle if completed_error is None else None,
         raw_text=raw,
-        prompt_eval_count=response.prompt_eval_count,
-        eval_count=response.eval_count,
-        done_reason=response.done_reason,
-        truncated=_truncated(response.done_reason),
-        cached=response.cached,
-        llm_elapsed_s=elapsed,
+        prompt_eval_count=prompt_eval_count,
+        eval_count=eval_count,
+        done_reason=done_reason,
+        truncated=_truncated(done_reason),
+        cached=cached,
+        llm_elapsed_s=llm_elapsed_s,
     )
 
 

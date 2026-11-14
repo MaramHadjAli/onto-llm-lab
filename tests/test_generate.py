@@ -20,6 +20,35 @@ from tests.support import MINI, ONTOLOGIES
 NS = "http://example.org/mini#"
 
 
+def test_replicate_index_is_not_part_of_the_prompt(tmp_path: Path) -> None:
+    prompts: list[str] = []
+
+    def respond(request: LLMRequest) -> str:
+        prompts.append(request.prompt)
+        return "ind:1 a :Pizza .\n"
+
+    client = make_client("mock", cache_dir=tmp_path / "cache", responder=respond)
+    ontology = load_ontology(MINI)
+    target = f"{NS}Pizza"
+    shared = dict(
+        target_class=target,
+        condition="A0",
+        n_individuals=1,
+        seed=0,
+        model="mock-1",
+        temperature=0.0,
+        max_tokens=64,
+        prompt_version="v3",
+    )
+    first = generate_individuals(ontology, str(MINI), client, replicate_index=0, **shared)
+    second = generate_individuals(ontology, str(MINI), client, replicate_index=1, **shared)
+    assert prompts[0] == prompts[1]
+    assert "replicate" not in prompts[0].lower()
+    assert first.prompt_hash == second.prompt_hash
+    assert first.cached is False and second.cached is False
+    assert first.replicate_index == 0 and second.replicate_index == 1
+
+
 def test_class_selection_is_deterministic() -> None:
     ontology = load_ontology(MINI)
     first = select_classes(ontology, 2, 0)

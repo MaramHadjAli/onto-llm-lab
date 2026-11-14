@@ -13,7 +13,8 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from rdflib import Graph
 
 from ollab.core.llm import LLMClient, make_client
-from ollab.core.ontology import load_ontology
+from ollab.core.ontology import Ontology, load_ontology
+from ollab.kgen.archive import CompletionArchive, fetch_ollama_version, new_run_id
 from ollab.kgen.generate import PromptVersion, generate_individuals, select_classes
 from ollab.kgen.records import RunOutput, RunRecord
 from ollab.kgen.repair import assess_generation, run_a2
@@ -40,7 +41,9 @@ class KgenConfig(BaseModel):
     n_classes: int
     n_individuals: int
     seeds: list[int]
+    replicates: list[int] = Field(default_factory=lambda: [0])
     class_seed: int = 0
+    class_pool: int | None = None
     conditions: list[str]
     provider: str
     model: str
@@ -71,6 +74,14 @@ class KgenConfig(BaseModel):
                 raise ValueError("A1 must appear before A2 in conditions")
             if not self.check:
                 raise ValueError("A2 requires validate: true")
+        if not self.replicates:
+            raise ValueError("replicates must not be empty")
+        if any(item < 0 for item in self.replicates):
+            raise ValueError("replicate_index must be non-negative")
+        if len(set(self.replicates)) != len(self.replicates):
+            raise ValueError("replicate indexes must be unique")
+        if self.class_pool is not None and self.class_pool < self.n_classes:
+            raise ValueError("class_pool must be at least n_classes")
         return self
 
 
@@ -80,6 +91,26 @@ def load_config(path: Path) -> KgenConfig:
     if not isinstance(payload, dict):
         raise ValueError(f"config must be a mapping: {path}")
     return KgenConfig.model_validate(payload)
+
+
+def planned_classes(
+    ontology: Ontology,
+    *,
+    n_classes: int,
+    class_seed: int,
+    class_pool: int | None = None,
+) -> tuple[str, ...]:
+    """Return the target classes for one ontology.
+
+    ``class_pool`` draws that many classes and keeps the first ``n_classes``
+    of the sorted draw. The noise study uses this so its 10 classes are a
+    subset of the main run's 30, not a fresh sample of 10.
+    """
+    draw = n_classes if class_pool is None else class_pool
+    chosen = select_classes(ontology, draw, class_seed)
+    if class_pool is None:
+        return chosen
+    return chosen[:n_classes]
 
 
 def is_results_path(path: Path, *, cwd: Path | None = None) -> bool:
@@ -99,6 +130,7 @@ def execute(
     dry_run: bool = False,
     client: LLMClient | None = None,
     cwd: Path | None = None,
+    archive: CompletionArchive | None = None,
 ) -> RunOutput:
     """Generate individuals for every class, seed, and condition of one ontology.
 
@@ -113,7 +145,12 @@ def execute(
         )
     ontology_path = _resolve(config.ontology, cwd)
     ontology = load_ontology(ontology_path)
-    classes = select_classes(ontology, config.n_classes, config.class_seed)
+    classes = planned_classes(
+        ontology,
+        n_classes=config.n_classes,
+        class_seed=config.class_seed,
+        class_pool=config.class_pool,
+    )
     llm = client or _make(config, cwd)
     shapes: Graph | None = None
     baseline = None
@@ -124,68 +161,86 @@ def execute(
         baseline_elapsed = time.perf_counter() - started
         shapes = build_shapes(ontology).graph
     records: list[RunRecord] = []
-    for seed in config.seeds:
-        for condition in config.conditions:
-            for target in classes:
-                if condition == "A2":
+
+    def _save(generation, round_index: int) -> None:
+        if archive is None:
+            return
+        archive.append(
+            generation,
+            ontology=str(ontology_path),
+            round_index=round_index,
+            num_ctx=config.num_ctx,
+            max_tokens=config.max_tokens,
+            class_seed=config.class_seed,
+        )
+
+    for replicate in config.replicates:
+        for seed in config.seeds:
+            for condition in config.conditions:
+                for target in classes:
+                    if condition == "A2":
+                        records.append(
+                            run_a2(
+                                ontology,
+                                ontology_path,
+                                llm,
+                                target_class=target,
+                                n_individuals=config.n_individuals,
+                                seed=seed,
+                                model=config.model,
+                                temperature=config.temperature,
+                                max_tokens=config.max_tokens,
+                                prompt_version=config.prompt_version,
+                                max_repair_rounds=config.max_repair_rounds,
+                                shapes=shapes,
+                                baseline=baseline,
+                                check=config.check,
+                                require_cache_hit=True,
+                                replicate_index=replicate,
+                                on_completion=_save,
+                            )
+                        )
+                        continue
+                    generated = generate_individuals(
+                        ontology,
+                        str(ontology_path),
+                        llm,
+                        target_class=target,
+                        condition=condition,  # type: ignore[arg-type]
+                        n_individuals=config.n_individuals,
+                        seed=seed,
+                        model=config.model,
+                        temperature=config.temperature,
+                        max_tokens=config.max_tokens,
+                        prompt_version=config.prompt_version,
+                        replicate_index=replicate,
+                    )
+                    _save(generated, 0)
+                    metrics, consistency, conforms, violations, elapsed, clean = assess_generation(
+                        ontology,
+                        ontology_path,
+                        generated,
+                        shapes=shapes,
+                        baseline=baseline,
+                        check=config.check,
+                    )
+                    round_record = _round(
+                        generated, metrics, consistency, conforms, violations, elapsed, clean
+                    )
                     records.append(
-                        run_a2(
-                            ontology,
-                            ontology_path,
-                            llm,
-                            target_class=target,
-                            n_individuals=config.n_individuals,
-                            seed=seed,
-                            model=config.model,
-                            temperature=config.temperature,
-                            max_tokens=config.max_tokens,
-                            prompt_version=config.prompt_version,
-                            max_repair_rounds=config.max_repair_rounds,
-                            shapes=shapes,
-                            baseline=baseline,
-                            check=config.check,
-                            require_cache_hit=True,
+                        RunRecord(
+                            condition=condition,  # type: ignore[arg-type]
+                            generation=generated,
+                            metrics=metrics,
+                            consistency=consistency,
+                            shacl_conforms=conforms,
+                            shacl_violations=violations or (),
+                            rounds=(round_record,),
+                            n_repair_rounds=0,
+                            round0_cached=generated.cached,
+                            stopped="single",
                         )
                     )
-                    continue
-                generated = generate_individuals(
-                    ontology,
-                    str(ontology_path),
-                    llm,
-                    target_class=target,
-                    condition=condition,  # type: ignore[arg-type]
-                    n_individuals=config.n_individuals,
-                    seed=seed,
-                    model=config.model,
-                    temperature=config.temperature,
-                    max_tokens=config.max_tokens,
-                    prompt_version=config.prompt_version,
-                )
-                metrics, consistency, conforms, violations, elapsed, clean = assess_generation(
-                    ontology,
-                    ontology_path,
-                    generated,
-                    shapes=shapes,
-                    baseline=baseline,
-                    check=config.check,
-                )
-                round_record = _round(
-                    generated, metrics, consistency, conforms, violations, elapsed, clean
-                )
-                records.append(
-                    RunRecord(
-                        condition=condition,  # type: ignore[arg-type]
-                        generation=generated,
-                        metrics=metrics,
-                        consistency=consistency,
-                        shacl_conforms=conforms,
-                        shacl_violations=violations or (),
-                        rounds=(round_record,),
-                        n_repair_rounds=0,
-                        round0_cached=generated.cached,
-                        stopped="single",
-                    )
-                )
     return RunOutput(
         provider=config.provider,
         model=config.model,
@@ -198,6 +253,9 @@ def execute(
         max_tokens=config.max_tokens,
         num_ctx=config.num_ctx,
         seeds=tuple(config.seeds),
+        replicates=tuple(config.replicates),
+        run_id=None if archive is None else archive.run_id,
+        ollama_version=None if archive is None else archive.ollama_version,
         baseline_consistent=None if baseline is None else baseline.consistent,
         baseline_unsatisfiable_classes=() if baseline is None else baseline.unsatisfiable_classes,
         baseline_error=None if baseline is None else baseline.error,
@@ -220,13 +278,24 @@ def execute_suite(
         )
     paths = tuple(config.ontologies) if config.ontologies else (config.ontology,)
     llm = client or _make(config, cwd)
+    archive = None
+    if not dry_run:
+        directory = _resolve(config.output, cwd)
+        version = None
+        if config.provider == "ollama":
+            version = fetch_ollama_version(config.base_url or "http://127.0.0.1:11434")
+        archive = CompletionArchive(
+            directory / "raw_completions.jsonl",
+            run_id=new_run_id(),
+            ollama_version=version,
+        )
     started = time.perf_counter()
     documents = []
     for path in paths:
         if path is None:
             continue
         one = config.model_copy(update={"ontology": path, "ontologies": []})
-        documents.append(execute(one, dry_run=True, client=llm, cwd=cwd))
+        documents.append(execute(one, dry_run=True, client=llm, cwd=cwd, archive=archive))
     wall_clock_s = time.perf_counter() - started
     from ollab.kgen.summarize import summarize
 
