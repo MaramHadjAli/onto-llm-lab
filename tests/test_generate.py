@@ -2,7 +2,9 @@
 
 from pathlib import Path
 
-from ollab.core.llm import LLMRequest, make_client
+from rdflib import Graph
+
+from ollab.core.llm import LLMRequest, hash_prompt, make_client
 from ollab.core.ontology import load_ontology
 from ollab.core.verbalize import verbalize
 from ollab.kgen.generate import (
@@ -230,3 +232,125 @@ def test_unclosed_fence_and_first_turtle_block() -> None:
         )
         flags.append((record.strict_parse_ok, record.lenient_parse_ok, record.n_individuals))
     assert flags == [(False, True, 1), (False, True, 1)]
+
+
+_V1_TYPE = "Every individual must have an explicit rdf:type."
+_V1_OUTPUT = "Output Turtle only, with no markdown fence and no explanation."
+_V2_TYPE = (
+    "Describe each individual with an explicit rdf:type and with property assertions "
+    "using the listed properties where they apply. Every individual used as the object "
+    "of a property must also be declared with an explicit rdf:type."
+)
+_V2_OUTPUT = (
+    "Output only the Turtle triples. Do not write @prefix lines and do not use a "
+    "markdown fence: the prefixes above are already declared."
+)
+# prompt_hash of the v1 A0 PizzaBase prompt, seed 0, 3 individuals, from the 7B smoke.
+_V1_PIZZA_BASE_A0 = "31fee5ecdd29f39262cf444a39caecc05c93e651560848486659a8820bfb247c"
+_V1_PIZZA_BASE_A1 = "b1a87ec5e9a6d12dc4c5ac5505d7ec13aa68478149de50450bf798f216f55d53"
+_PIZZA = "https://raw.githubusercontent.com/owlcs/pizza-ontology/refs/heads/master/pizza.owl#"
+
+
+def test_v1_prompt_text_and_hash_match_the_recorded_smoke() -> None:
+    ontology = load_ontology(ONTOLOGIES / "pizza.owl")
+    target = _PIZZA + "PizzaBase"
+    a0 = build_prompt(
+        ontology, target, condition="A0", n_individuals=3, seed=0, prompt_version="v1"
+    )
+    a1 = build_prompt(
+        ontology, target, condition="A1", n_individuals=3, seed=0, prompt_version="v1"
+    )
+    assert _V1_TYPE in a0
+    assert _V1_OUTPUT in a0
+    assert "\nTarget class: PizzaBase :PizzaBase\n" in a0
+    assert _V2_OUTPUT not in a0
+    assert a1.startswith(a0)
+    assert a1[len(a0) :].startswith("\nAxioms:\n")
+    assert hash_prompt(LLMRequest(model="qwen2.5:7b", prompt=a0, prompt_version="v1")) == (
+        _V1_PIZZA_BASE_A0
+    )
+    assert hash_prompt(LLMRequest(model="qwen2.5:7b", prompt=a1, prompt_version="v1")) == (
+        _V1_PIZZA_BASE_A1
+    )
+    bare = hash_prompt(LLMRequest(model="qwen2.5:7b", prompt=a0))
+    assert bare == _V1_PIZZA_BASE_A0
+
+
+def test_v2_changes_only_the_three_instruction_lines() -> None:
+    ontology = load_ontology(ONTOLOGIES / "pizza.owl")
+    target = _PIZZA + "PizzaBase"
+    a0 = build_prompt(
+        ontology, target, condition="A0", n_individuals=3, seed=0, prompt_version="v2"
+    )
+    a1 = build_prompt(
+        ontology, target, condition="A1", n_individuals=3, seed=0, prompt_version="v2"
+    )
+    assert _V2_TYPE in a0
+    assert _V2_OUTPUT in a0
+    assert _V1_TYPE not in a0
+    assert _V1_OUTPUT not in a0
+    assert "\nTarget class: :PizzaBase\n" in a0
+    assert "\nTarget class: PizzaBase :PizzaBase\n" not in a0
+    assert a1.startswith(a0)
+    assert a1[len(a0) :].startswith("\nAxioms:\n")
+    v2_hash = hash_prompt(LLMRequest(model="qwen2.5:7b", prompt=a0, prompt_version="v2"))
+    assert v2_hash != hash_prompt(LLMRequest(model="qwen2.5:7b", prompt=a0))
+    assert v2_hash != _V1_PIZZA_BASE_A0
+
+
+def test_prefix_completion_parse_metrics() -> None:
+    ontology = load_ontology(MINI)
+    target = f"{NS}Pizza"
+
+    def run(text: str):
+        return generate_individuals(
+            ontology,
+            str(MINI),
+            make_client("mock", responder=lambda _request: text),
+            target_class=target,
+            condition="A0",
+            n_individuals=2,
+            seed=0,
+            model="mock-1",
+        )
+
+    ind_style = "ind:1 a :Pizza ;\n    :hasTopping ind:2 .\nind:2 a :PizzaTopping .\n"
+    bare = run(ind_style)
+    assert bare.prompt_version == "v2"
+    assert bare.strict_parse_ok is False
+    assert bare.lenient_parse_ok is False
+    assert bare.prefix_completed_parse_ok is True
+    assert bare.parse_error is None
+    assert bare.n_individuals == 2
+    assert bare.n_type_triples == 2
+    assert bare.n_property_triples == 1
+    assert f"{NS}Pizza" not in bare.undefined_terms
+    parsed = Graph()
+    parsed.parse(data=bare.turtle, format="turtle")
+    assert "http://ollab.local/gen/0/Pizza/1" in {str(subject) for subject in parsed.subjects()}
+
+    declared = (
+        f"@prefix : <{NS}> .\n@prefix ind: <http://ollab.local/gen/0/Pizza/> .\nind:1 a :Pizza .\n"
+    )
+    already = run(declared)
+    assert already.strict_parse_ok is True
+    assert already.lenient_parse_ok is True
+    assert already.prefix_completed_parse_ok is True
+    assert already.n_type_triples == 1
+    assert already.n_property_triples == 0
+
+    fenced = run("```turtle\nind:1 a :Pizza .\n```\n")
+    assert fenced.strict_parse_ok is False
+    assert fenced.lenient_parse_ok is False
+    assert fenced.prefix_completed_parse_ok is True
+    assert fenced.n_type_triples == 1
+
+    prose = run("this is not turtle")
+    assert prose.strict_parse_ok is False
+    assert prose.lenient_parse_ok is False
+    assert prose.prefix_completed_parse_ok is False
+    assert prose.parse_error
+    assert prose.turtle is None
+    assert prose.n_individuals == 0
+    assert prose.n_type_triples == 0
+    assert prose.n_property_triples == 0

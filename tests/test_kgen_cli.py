@@ -47,6 +47,7 @@ def test_dry_run_prints_prompt_hash_and_writes_nothing(tmp_path: Path) -> None:
     assert result.exit_code == 0
     assert '"provider": "mock"' in result.stdout
     assert '"prompt_hash":' in result.stdout
+    assert '"prompt_version": "v2"' in result.stdout
     assert '"seed": 0' in result.stdout
     assert not target.exists()
 

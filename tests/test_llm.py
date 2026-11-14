@@ -118,6 +118,14 @@ def test_cache_replays_and_logs_without_storing_the_secret(tmp_path: Path) -> No
     assert lines[0]["usage_source"] == "whitespace_estimate"
 
 
+def test_prompt_version_v1_keeps_the_historical_cache_key() -> None:
+    bare = cache_key("mock", "mock://local", _request())
+    v1 = cache_key("mock", "mock://local", _request(prompt_version="v1"))
+    v2 = cache_key("mock", "mock://local", _request(prompt_version="v2"))
+    assert v1 == bare
+    assert v2 != bare
+
+
 def test_cache_key_changes_with_seed_temperature_and_prompt() -> None:
     base = _request()
     original = cache_key("mock", "mock://local", base)
