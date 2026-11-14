@@ -1,14 +1,20 @@
 """A0 and A1 individual generation.
 
-A0 puts class and property labels in the prompt. A1 adds the verbalised
+A0 puts class and property names in the prompt. A1 adds the verbalised
 axioms that mention the target class, plus domain, range, and functional
-axioms of the properties used in those axioms. Prompts are deterministic for
-a fixed ontology, class, seed, and individual count.
+axioms of the properties used in those axioms. The two prompts are identical
+except for that axioms block. A name shown to the model is an English
+``rdfs:label`` when the ontology has one, otherwise the IRI local name.
+A display string shared by two IRIs is replaced by the local name. The prompt
+declares the ``rdf``, ``rdfs``, ``owl``, ``xsd``, ontology, and individual
+prefixes, and it writes classes and properties as CURIEs.
 
-Target classes are chosen once from a seeded sample of the named classes,
-then sorted by IRI. Fresh individual IRIs are allowed. A predicate, a
-``rdf:type`` object, or a non-individual object IRI that is outside the
-ontology and outside the RDF, RDFS, OWL, and XSD namespaces is an undefined term.
+Prompts are deterministic for a fixed ontology, class, seed, and individual
+count. Target classes are chosen once from a seeded sample of the named
+classes, then sorted by IRI. Fresh individual IRIs are allowed. A predicate,
+a ``rdf:type`` object, or a non-individual object IRI that is outside the
+ontology and outside the RDF, RDFS, OWL, and XSD namespaces is an undefined
+term.
 
 Output parsing is the same for A0 and A1. ``strict_parse_ok`` is true when
 the raw completion parses as Turtle. ``lenient_parse_ok`` is true when the
@@ -19,23 +25,27 @@ Turtle block. It does not add prefixes, insert punctuation, or rewrite IRIs.
 
 from __future__ import annotations
 
+from collections import Counter
 from typing import Literal
 
 import numpy as np
 from pydantic import BaseModel, ConfigDict
 from rdflib import Graph, URIRef
-from rdflib.namespace import RDF
+from rdflib import Literal as RdfLiteral
+from rdflib.namespace import RDF, RDFS
 
 from ollab.core.llm import LLMClient, LLMRequest
 from ollab.core.ontology import Axiom, Expr, Ontology
 from ollab.core.verbalize import local_name, verbalize
 
 Condition = Literal["A0", "A1"]
-_BUILTIN_PREFIXES = (
-    "http://www.w3.org/1999/02/22-rdf-syntax-ns#",
-    "http://www.w3.org/2000/01/rdf-schema#",
-    "http://www.w3.org/2002/07/owl#",
-    "http://www.w3.org/2001/XMLSchema#",
+_DECLARED_PREFIXES = (
+    ("rdf", "http://www.w3.org/1999/02/22-rdf-syntax-ns#"),
+    ("rdfs", "http://www.w3.org/2000/01/rdf-schema#"),
+    ("owl", "http://www.w3.org/2002/07/owl#"),
+    ("xsd", "http://www.w3.org/2001/XMLSchema#"),
+)
+_BUILTIN_PREFIXES = tuple(item[1] for item in _DECLARED_PREFIXES) + (
     "http://www.w3.org/XML/1998/namespace",
 )
 _EXCLUDED = {
@@ -69,6 +79,8 @@ class GenerationRecord(BaseModel):
     undefined_terms: tuple[str, ...]
     turtle: str | None
     raw_text: str
+    prompt_eval_count: int | None = None
+    eval_count: int | None = None
 
 
 def select_classes(ontology: Ontology, n: int, seed: int) -> tuple[str, ...]:
@@ -101,35 +113,47 @@ def build_prompt(
     n_individuals: int,
     seed: int,
 ) -> str:
-    """Build the A0 or A1 user prompt. The system message is unused."""
-    labels = ontology.labels()
-    lines = [
-        f"Generate {n_individuals} RDF individuals as Turtle.",
-        "Use only the class and property IRIs listed below, plus new individual IRIs.",
-        "Every individual must have an explicit rdf:type.",
-        "Output Turtle only, with no markdown fence and no explanation.",
-        f"Seed: {seed}",
-        f"Target class: {_label(target_class, labels)} <{target_class}>",
-        f"Individual IRI pattern: <http://ollab.local/gen/{seed}/{local_name(target_class)}/N>",
-        "",
-        "Classes:",
-    ]
+    """Build the A0 or A1 user prompt. The system message is unused.
+
+    A1 is the A0 text plus the axioms block. Nothing earlier in the prompt
+    depends on the condition.
+    """
+    labels = prompt_labels(ontology)
+    ontology_ns = _ontology_namespace(ontology)
+    individual_ns = f"http://ollab.local/gen/{seed}/{local_name(target_class)}/"
+    prefixes = _prefix_map(ontology_ns, individual_ns)
+    lines = _prefix_lines(ontology_ns, individual_ns)
+    lines.extend(
+        [
+            "",
+            f"Generate {n_individuals} RDF individuals as Turtle.",
+            "Use only the class and property IRIs listed below, plus new individual IRIs.",
+            "Every individual must have an explicit rdf:type.",
+            "Output Turtle only, with no markdown fence and no explanation.",
+            f"Seed: {seed}",
+            f"Target class: {_label(target_class, labels)} {_curie(target_class, prefixes)}",
+            "Individual IRI pattern: ind:N",
+            "",
+            "Classes:",
+        ]
+    )
     for iri in ontology.named_classes():
-        lines.append(f"- {_label(iri, labels)} <{iri}>")
+        lines.append(f"- {_label(iri, labels)} {_curie(iri, prefixes)}")
     lines.append("")
     lines.append("Properties:")
     properties = ontology.object_properties() + ontology.data_properties()
     for iri in properties:
-        lines.append(f"- {_label(iri, labels)} <{iri}>")
-    if condition == "A1":
-        lines.append("")
-        lines.append("Axioms:")
-        axioms = axioms_for_class(ontology, target_class)
-        if not axioms:
-            lines.append("- No verbalised axiom mentions this class.")
-        for index, axiom in enumerate(axioms, start=1):
-            lines.append(f"{index}. {verbalize(axiom, labels)}")
-    return "\n".join(lines) + "\n"
+        lines.append(f"- {_label(iri, labels)} {_curie(iri, prefixes)}")
+    shared = "\n".join(lines) + "\n"
+    if condition == "A0":
+        return shared
+    axiom_lines = ["", "Axioms:"]
+    axioms = axioms_for_class(ontology, target_class)
+    if not axioms:
+        axiom_lines.append("- No verbalised axiom mentions this class.")
+    for index, axiom in enumerate(axioms, start=1):
+        axiom_lines.append(f"{index}. {verbalize(axiom, labels)}")
+    return shared + "\n".join(axiom_lines) + "\n"
 
 
 def axioms_for_class(ontology: Ontology, target_class: str) -> tuple[Axiom, ...]:
@@ -216,6 +240,8 @@ def generate_individuals(
         undefined_terms=undefined,
         turtle=turtle if lenient_error is None else None,
         raw_text=raw,
+        prompt_eval_count=response.prompt_eval_count,
+        eval_count=response.eval_count,
     )
 
 
@@ -317,6 +343,101 @@ def _allowed(iri: str, known: set[str]) -> bool:
     if iri in known:
         return True
     return any(iri.startswith(prefix) for prefix in _BUILTIN_PREFIXES)
+
+
+def prompt_labels(ontology: Ontology) -> dict[str, str]:
+    """Names for one prompt: an English label, otherwise the local name.
+
+    Labels with no language tag and labels in any other language are ignored.
+    When two IRIs would show the same string, both use the local name. When
+    those local names still collide, the IRI itself is shown.
+    """
+    english = _english_labels(ontology.graph)
+    iris = set(ontology.named_classes())
+    iris.update(ontology.object_properties())
+    iris.update(ontology.data_properties())
+    for axiom in ontology.axioms():
+        iris.update(_axiom_iris(axiom))
+    preferred = {iri: english.get(iri) or local_name(iri) for iri in iris}
+    return _unique_labels(preferred)
+
+
+def _english_labels(graph: Graph) -> dict[str, str]:
+    grouped: dict[str, list[str]] = {}
+    for subject, obj in graph.subject_objects(RDFS.label):
+        if not isinstance(subject, URIRef) or not isinstance(obj, RdfLiteral):
+            continue
+        if not _is_english(obj.language or ""):
+            continue
+        text = str(obj).strip()
+        if not text:
+            continue
+        grouped.setdefault(str(subject), []).append(text)
+    return {iri: sorted(texts)[0] for iri, texts in grouped.items()}
+
+
+def _is_english(language: str) -> bool:
+    tag = language.lower()
+    return tag == "en" or tag.startswith("en-")
+
+
+def _unique_labels(preferred: dict[str, str]) -> dict[str, str]:
+    counts = Counter(preferred.values())
+    resolved = {
+        iri: local_name(iri) if counts[text] > 1 else text for iri, text in preferred.items()
+    }
+    counts = Counter(resolved.values())
+    if all(count == 1 for count in counts.values()):
+        return resolved
+    again = {iri: local_name(iri) if counts[text] > 1 else text for iri, text in resolved.items()}
+    counts = Counter(again.values())
+    if all(count == 1 for count in counts.values()):
+        return again
+    return {iri: iri if counts[text] > 1 else text for iri, text in again.items()}
+
+
+def _ontology_namespace(ontology: Ontology) -> str:
+    iris = ontology.named_classes() or ontology.object_properties() or ontology.data_properties()
+    if not iris:
+        if ontology.iri:
+            return _namespace_of(ontology.iri)
+        raise ValueError("ontology has no named class, property, or IRI")
+    counts = Counter(_namespace_of(iri) for iri in iris)
+    return sorted(counts, key=lambda ns: (-counts[ns], ns))[0]
+
+
+def _namespace_of(iri: str) -> str:
+    if "#" in iri:
+        return iri.rsplit("#", 1)[0] + "#"
+    if "/" in iri:
+        return iri.rsplit("/", 1)[0] + "/"
+    return iri
+
+
+def _prefix_lines(ontology_ns: str, individual_ns: str) -> list[str]:
+    lines = [f"@prefix {name}: <{ns}> ." for name, ns in _DECLARED_PREFIXES]
+    lines.append(f"@prefix : <{ontology_ns}> .")
+    lines.append(f"@prefix ind: <{individual_ns}> .")
+    return lines
+
+
+def _prefix_map(ontology_ns: str, individual_ns: str) -> dict[str, str]:
+    mapping = {ns: name for name, ns in _DECLARED_PREFIXES}
+    mapping[ontology_ns] = ""
+    mapping[individual_ns] = "ind"
+    return mapping
+
+
+def _curie(iri: str, prefixes: dict[str, str]) -> str:
+    matches = [ns for ns in prefixes if iri.startswith(ns)]
+    if not matches:
+        return f"<{iri}>"
+    ns = max(matches, key=len)
+    name = prefixes[ns]
+    local = iri[len(ns) :]
+    if name:
+        return f"{name}:{local}"
+    return f":{local}"
 
 
 def _label(iri: str, labels: dict[str, str]) -> str:
