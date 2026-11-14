@@ -11,7 +11,13 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from ollab.core.llm import LLMClient, make_client
 from ollab.core.ontology import load_ontology
-from ollab.kgen.generate import Condition, GenerationRecord, generate_individuals, select_classes
+from ollab.kgen.generate import (
+    Condition,
+    GenerationRecord,
+    PromptVersion,
+    generate_individuals,
+    select_classes,
+)
 from ollab.kgen.shapes import build_shapes
 from ollab.kgen.validate_owl import ConsistencyReport, check_consistency
 from ollab.kgen.validate_shacl import ShaclViolation, validate_shacl
@@ -37,6 +43,7 @@ class KgenConfig(BaseModel):
     temperature: float = 0.0
     max_tokens: int = 1024
     num_ctx: int = Field(default=16384, gt=0)
+    prompt_version: PromptVersion = "v2"
     output: Path = Path("results/kgen_smoke.json")
     base_url: str | None = None
     check: bool = Field(default=True, alias="validate")
@@ -126,11 +133,12 @@ def execute(
                     model=config.model,
                     temperature=config.temperature,
                     max_tokens=config.max_tokens,
+                    prompt_version=config.prompt_version,
                 )
                 consistency = None
                 conforms: bool | None = None
                 violations: tuple[ShaclViolation, ...] = ()
-                if config.check and generated.lenient_parse_ok and generated.turtle:
+                if config.check and generated.prefix_completed_parse_ok and generated.turtle:
                     consistency = check_consistency(ontology_path, generated.turtle)
                     if shapes is not None:
                         conforms, violations = validate_shacl(

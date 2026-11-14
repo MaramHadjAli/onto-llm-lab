@@ -16,11 +16,18 @@ a ``rdf:type`` object, or a non-individual object IRI that is outside the
 ontology and outside the RDF, RDFS, OWL, and XSD namespaces is an undefined
 term.
 
-Output parsing is the same for A0 and A1. ``strict_parse_ok`` is true when
-the raw completion parses as Turtle. ``lenient_parse_ok`` is true when the
-text parses after :func:`extract_turtle`. That function is the only repair:
-it drops a markdown fence, including an unclosed one, and keeps the first
-Turtle block. It does not add prefixes, insert punctuation, or rewrite IRIs.
+Output parsing is the same for A0 and A1 and for both prompt versions.
+``strict_parse_ok`` is true when the raw completion parses as Turtle.
+``lenient_parse_ok`` is true when the text parses after :func:`extract_turtle`.
+That function is the only repair of the completion: it drops a markdown
+fence, including an unclosed one, and keeps the first Turtle block. It does
+not add prefixes, insert punctuation, or rewrite IRIs. A separate step then
+prepends the prompt's exact ``@prefix`` block. ``prefix_completed_parse_ok``
+is true when that text parses. Validation uses the prefix-completed graph.
+
+Prompt ``v1`` is the original wording. Prompt ``v2`` changes the output
+instruction, the typing instruction, and the target-class line. A0 and A1
+still differ only by the axioms block. See ``docs/prompt_versions.md``.
 """
 
 from __future__ import annotations
@@ -39,6 +46,7 @@ from ollab.core.ontology import Axiom, Expr, Ontology
 from ollab.core.verbalize import local_name, verbalize
 
 Condition = Literal["A0", "A1"]
+PromptVersion = Literal["v1", "v2"]
 _DECLARED_PREFIXES = (
     ("rdf", "http://www.w3.org/1999/02/22-rdf-syntax-ns#"),
     ("rdfs", "http://www.w3.org/2000/01/rdf-schema#"),
@@ -58,8 +66,12 @@ class GenerationRecord(BaseModel):
     """One class, one seed, one condition.
 
     ``strict_parse_ok`` is the raw completion. ``lenient_parse_ok`` is the
-    result after ``extract_turtle``. ``parse_error`` is that second parse's
-    error, and is null when the lenient parse succeeds.
+    result after ``extract_turtle``. ``prefix_completed_parse_ok`` is that
+    text with the prompt's prefix block prepended. ``parse_error`` is the
+    prefix-completed parse error, and is null when that parse succeeds.
+    ``n_type_triples`` counts ``rdf:type`` triples in the prefix-completed
+    graph. ``n_property_triples`` counts every other triple. Both are zero
+    when the prefix-completed parse fails.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -70,12 +82,16 @@ class GenerationRecord(BaseModel):
     provider: str
     model: str
     temperature: float
+    prompt_version: PromptVersion = "v2"
     prompt_hash: str
     strict_parse_ok: bool
     lenient_parse_ok: bool
+    prefix_completed_parse_ok: bool
     parse_error: str | None
     n_requested: int
     n_individuals: int
+    n_type_triples: int
+    n_property_triples: int
     undefined_terms: tuple[str, ...]
     turtle: str | None
     raw_text: str
@@ -112,30 +128,29 @@ def build_prompt(
     condition: Condition,
     n_individuals: int,
     seed: int,
+    prompt_version: PromptVersion = "v2",
 ) -> str:
     """Build the A0 or A1 user prompt. The system message is unused.
 
     A1 is the A0 text plus the axioms block. Nothing earlier in the prompt
-    depends on the condition.
+    depends on the condition. ``v1`` and ``v2`` share that split; the version
+    only changes the three instruction lines described in
+    ``docs/prompt_versions.md``.
     """
+    _require_prompt_version(prompt_version)
     labels = prompt_labels(ontology)
-    ontology_ns = _ontology_namespace(ontology)
-    individual_ns = f"http://ollab.local/gen/{seed}/{local_name(target_class)}/"
+    ontology_ns, individual_ns = _prompt_namespaces(ontology, target_class, seed)
     prefixes = _prefix_map(ontology_ns, individual_ns)
     lines = _prefix_lines(ontology_ns, individual_ns)
     lines.extend(
-        [
-            "",
-            f"Generate {n_individuals} RDF individuals as Turtle.",
-            "Use only the class and property IRIs listed below, plus new individual IRIs.",
-            "Every individual must have an explicit rdf:type.",
-            "Output Turtle only, with no markdown fence and no explanation.",
-            f"Seed: {seed}",
-            f"Target class: {_label(target_class, labels)} {_curie(target_class, prefixes)}",
-            "Individual IRI pattern: ind:N",
-            "",
-            "Classes:",
-        ]
+        _instruction_lines(
+            prompt_version,
+            n_individuals=n_individuals,
+            seed=seed,
+            target_class=target_class,
+            labels=labels,
+            prefixes=prefixes,
+        )
     )
     for iri in ontology.named_classes():
         lines.append(f"- {_label(iri, labels)} {_curie(iri, prefixes)}")
@@ -192,24 +207,29 @@ def generate_individuals(
     model: str,
     temperature: float = 0.0,
     max_tokens: int = 1024,
+    prompt_version: PromptVersion = "v2",
 ) -> GenerationRecord:
     """Call the shared LLM client once and score the Turtle it returns.
 
     ``ontology_path`` is recorded by the caller in the run file. It is accepted
-    here so a record can be built without a second lookup.
+    here so a record can be built without a second lookup. The prefix block
+    prepended before the third parse is the same block the prompt starts with.
     """
     del ontology_path
+    _require_prompt_version(prompt_version)
     prompt = build_prompt(
         ontology,
         target_class,
         condition=condition,
         n_individuals=n_individuals,
         seed=seed,
+        prompt_version=prompt_version,
     )
     response = client.complete(
         LLMRequest(
             model=model,
             prompt=prompt,
+            prompt_version=prompt_version,
             temperature=temperature,
             seed=seed,
             max_tokens=max_tokens,
@@ -218,12 +238,18 @@ def generate_individuals(
     raw = response.text
     _, strict_error, _ = _parse_graph(raw)
     extracted = extract_turtle(raw)
-    turtle, lenient_error, parsed = _parse_graph(extracted)
+    _, lenient_error, _ = _parse_graph(extracted)
+    ontology_ns, individual_ns = _prompt_namespaces(ontology, target_class, seed)
+    completed = _prefix_block(ontology_ns, individual_ns) + extracted
+    turtle, completed_error, parsed = _parse_graph(completed)
     undefined: tuple[str, ...] = ()
     count = 0
+    n_type = 0
+    n_property = 0
     if parsed is not None:
         undefined = undefined_terms(ontology, parsed)
         count = _individual_count(parsed)
+        n_type, n_property = _triple_counts(parsed)
     return GenerationRecord(
         condition=condition,
         seed=seed,
@@ -231,14 +257,18 @@ def generate_individuals(
         provider=response.provider,
         model=response.model,
         temperature=temperature,
+        prompt_version=prompt_version,
         prompt_hash=response.prompt_hash,
         strict_parse_ok=strict_error is None,
         lenient_parse_ok=lenient_error is None,
-        parse_error=lenient_error,
+        prefix_completed_parse_ok=completed_error is None,
+        parse_error=completed_error,
         n_requested=n_individuals,
         n_individuals=count,
+        n_type_triples=n_type,
+        n_property_triples=n_property,
         undefined_terms=undefined,
-        turtle=turtle if lenient_error is None else None,
+        turtle=turtle if completed_error is None else None,
         raw_text=raw,
         prompt_eval_count=response.prompt_eval_count,
         eval_count=response.eval_count,
@@ -321,6 +351,18 @@ def _fence_spans(text: str) -> list[tuple[str, str]]:
             return spans
         spans.append((tag, text[line_end + 1 : close]))
         cursor = close + 3
+
+
+def _triple_counts(graph: Graph) -> tuple[int, int]:
+    """Return ``(rdf:type triples, every other triple)``."""
+    n_type = 0
+    n_property = 0
+    for _subject, predicate, _obj in graph:
+        if predicate == RDF.type:
+            n_type += 1
+        else:
+            n_property += 1
+    return n_type, n_property
 
 
 def _individual_count(graph: Graph) -> int:
@@ -412,6 +454,69 @@ def _namespace_of(iri: str) -> str:
     if "/" in iri:
         return iri.rsplit("/", 1)[0] + "/"
     return iri
+
+
+def _require_prompt_version(prompt_version: str) -> None:
+    if prompt_version not in ("v1", "v2"):
+        raise ValueError(f"prompt_version must be 'v1' or 'v2', got {prompt_version!r}")
+
+
+def _instruction_lines(
+    prompt_version: PromptVersion,
+    *,
+    n_individuals: int,
+    seed: int,
+    target_class: str,
+    labels: dict[str, str],
+    prefixes: dict[str, str],
+) -> list[str]:
+    """The shared instruction block. v1 text is the original wording."""
+    if prompt_version == "v1":
+        type_line = "Every individual must have an explicit rdf:type."
+        output_line = "Output Turtle only, with no markdown fence and no explanation."
+        target_line = (
+            f"Target class: {_label(target_class, labels)} {_curie(target_class, prefixes)}"
+        )
+    else:
+        type_line = (
+            "Describe each individual with an explicit rdf:type and with property "
+            "assertions using the listed properties where they apply. Every individual "
+            "used as the object of a property must also be declared with an explicit "
+            "rdf:type."
+        )
+        output_line = (
+            "Output only the Turtle triples. Do not write @prefix lines and do not use "
+            "a markdown fence: the prefixes above are already declared."
+        )
+        target_line = f"Target class: {_curie(target_class, prefixes)}"
+    return [
+        "",
+        f"Generate {n_individuals} RDF individuals as Turtle.",
+        "Use only the class and property IRIs listed below, plus new individual IRIs.",
+        type_line,
+        output_line,
+        f"Seed: {seed}",
+        target_line,
+        "Individual IRI pattern: ind:N",
+        "",
+        "Classes:",
+    ]
+
+
+def _prompt_namespaces(ontology: Ontology, target_class: str, seed: int) -> tuple[str, str]:
+    ontology_ns = _ontology_namespace(ontology)
+    individual_ns = f"http://ollab.local/gen/{seed}/{local_name(target_class)}/"
+    return ontology_ns, individual_ns
+
+
+def _prefix_block(ontology_ns: str, individual_ns: str) -> str:
+    """The prompt's ``@prefix`` lines, including the trailing newline.
+
+    This is the block prepended to a completion. It is not a repair of the
+    model text: the completion is left unchanged and the same bytes are used
+    for every condition and every prompt version.
+    """
+    return "\n".join(_prefix_lines(ontology_ns, individual_ns)) + "\n"
 
 
 def _prefix_lines(ontology_ns: str, individual_ns: str) -> list[str]:
