@@ -108,6 +108,8 @@ class LLMResponse(BaseModel):
     usage_source: UsageSource
     cost_usd: float | None
     cached: bool
+    prompt_eval_count: int | None = None
+    eval_count: int | None = None
 
 
 class RawCompletion(BaseModel):
@@ -138,8 +140,17 @@ def hash_prompt(request: LLMRequest) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
-def cache_key(provider: str, endpoint: str, request: LLMRequest) -> str:
-    """SHA-256 of provider, endpoint, model, sampling parameters, and prompt hash."""
+def cache_key(
+    provider: str,
+    endpoint: str,
+    request: LLMRequest,
+    *,
+    num_ctx: int | None = None,
+) -> str:
+    """SHA-256 of provider, endpoint, model, sampling parameters, and prompt hash.
+
+    ``num_ctx`` is included for Ollama, where it changes the context window.
+    """
     payload = {
         "provider": provider,
         "endpoint": endpoint,
@@ -150,6 +161,8 @@ def cache_key(provider: str, endpoint: str, request: LLMRequest) -> str:
         "max_tokens": request.max_tokens,
         "extra": request.extra,
     }
+    if num_ctx is not None:
+        payload["num_ctx"] = num_ctx
     raw = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
@@ -280,7 +293,11 @@ class OpenAICompatibleProvider:
 
 
 class OllamaProvider:
-    """Local Ollama chat. ``prompt_eval_count`` and ``eval_count`` map to tokens."""
+    """Local Ollama chat. ``prompt_eval_count`` and ``eval_count`` map to tokens.
+
+    ``num_ctx`` is sent on every call. The default is 16384. A response whose
+    ``prompt_eval_count`` reaches 90% of that window raises ``LLMClientError``.
+    """
 
     name = "ollama"
 
@@ -292,10 +309,14 @@ class OllamaProvider:
         timeout_s: float = 120.0,
         max_attempts: int = 3,
         backoff_s: float = 0.5,
+        num_ctx: int = 16384,
     ) -> None:
         if max_attempts < 1:
             raise ValueError("max_attempts must be positive")
+        if isinstance(num_ctx, bool) or not isinstance(num_ctx, int) or num_ctx < 1:
+            raise ValueError("num_ctx must be a positive integer")
         self.endpoint = base_url.rstrip("/")
+        self.num_ctx = num_ctx
         self._max_attempts = max_attempts
         self._backoff_s = backoff_s
         self._client = httpx.Client(base_url=self.endpoint, transport=transport, timeout=timeout_s)
@@ -304,10 +325,12 @@ class OllamaProvider:
         options: dict[str, Any] = {
             "temperature": request.temperature,
             "num_predict": request.max_tokens,
+            "num_ctx": self.num_ctx,
         }
         if request.seed is not None:
             options["seed"] = request.seed
         options.update(request.extra)
+        num_ctx = options["num_ctx"]
         payload = {
             "model": request.model,
             "messages": _messages(request),
@@ -322,7 +345,9 @@ class OllamaProvider:
             backoff_s=self._backoff_s,
             secret="",
         )
-        return _parse_ollama(response.json(), fallback_model=request.model)
+        raw = _parse_ollama(response.json(), fallback_model=request.model)
+        _reject_full_context(raw.prompt_tokens, num_ctx)
+        return raw
 
     def close(self) -> None:
         self._client.close()
@@ -346,7 +371,13 @@ class LLMClient:
 
     def complete(self, request: LLMRequest) -> LLMResponse:
         """Return a cached completion when the key matches, otherwise call the provider."""
-        key = cache_key(self.provider.name, self.provider.endpoint, request)
+        num_ctx = getattr(self.provider, "num_ctx", None)
+        key = cache_key(
+            self.provider.name,
+            self.provider.endpoint,
+            request,
+            num_ctx=num_ctx if isinstance(num_ctx, int) else None,
+        )
         prompt_hash = hash_prompt(request)
         if self.cache is not None:
             cached = self.cache.get(key)
@@ -356,6 +387,7 @@ class LLMClient:
                 self._log(replayed)
                 return replayed
         raw = self.provider.complete(request)
+        ollama_counts = self.provider.name == "ollama"
         response = LLMResponse(
             text=raw.text,
             model=raw.model,
@@ -371,6 +403,8 @@ class LLMClient:
             usage_source=raw.usage_source,
             cost_usd=estimate_cost(raw.prompt_tokens, raw.completion_tokens, self.prices),
             cached=False,
+            prompt_eval_count=raw.prompt_tokens if ollama_counts else None,
+            eval_count=raw.completion_tokens if ollama_counts else None,
         )
         if self.cache is not None:
             self.cache.put(
@@ -394,6 +428,8 @@ class LLMClient:
             "endpoint": response.endpoint,
             "max_tokens": response.max_tokens,
             "model": response.model,
+            "eval_count": response.eval_count,
+            "prompt_eval_count": response.prompt_eval_count,
             "prompt_hash": response.prompt_hash,
             "prompt_tokens": response.prompt_tokens,
             "provider": response.provider,
@@ -418,6 +454,7 @@ def make_client(
     api_key: str | None = None,
     base_url: str | None = None,
     responder: Callable[[LLMRequest], str] | None = None,
+    num_ctx: int = 16384,
 ) -> LLMClient:
     """Build the shared client.
 
@@ -444,6 +481,7 @@ def make_client(
             transport=transport,
             max_attempts=max_attempts,
             backoff_s=backoff_s,
+            num_ctx=num_ctx,
         )
     else:
         raise LLMClientError(f"unknown LLM provider: {provider}")
@@ -527,6 +565,20 @@ def _parse_ollama(data: Any, *, fallback_model: str) -> RawCompletion:
         completion_tokens=completion_tokens,
         usage_source=source,
     )
+
+
+def _reject_full_context(prompt_eval_count: int | None, num_ctx: object) -> None:
+    """Fail when the prompt occupies at least 90% of the Ollama context window."""
+    if isinstance(num_ctx, bool) or not isinstance(num_ctx, int) or num_ctx < 1:
+        raise LLMClientError(f"num_ctx must be a positive integer, got {num_ctx!r}")
+    if prompt_eval_count is None:
+        return
+    limit = 0.9 * num_ctx
+    if prompt_eval_count >= limit:
+        raise LLMClientError(
+            f"Ollama prompt_eval_count {prompt_eval_count} >= 0.9 * num_ctx {num_ctx} "
+            f"({limit:g}). The prompt uses at least 90% of the context window."
+        )
 
 
 def _usage_pair(
