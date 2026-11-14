@@ -67,6 +67,9 @@ class RunOutput(BaseModel):
     max_tokens: int | None = None
     num_ctx: int | None = None
     seeds: tuple[int, ...] = ()
+    replicates: tuple[int, ...] = ()
+    run_id: str | None = None
+    ollama_version: str | None = None
     baseline_consistent: bool | None = None
     baseline_unsatisfiable_classes: tuple[str, ...] = ()
     baseline_error: str | None = None

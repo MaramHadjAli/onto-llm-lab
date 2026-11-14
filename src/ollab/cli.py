@@ -68,20 +68,61 @@ def kgen_run(
         str | None, typer.Option("--model", help="Override the model name in the config.")
     ] = None,
 ) -> None:
-    """Generate A0/A1 individuals. Mock output cannot be written under results/."""
-    from ollab.kgen.run import SafetyError, dump_document, execute, load_config, write_output
+    """Generate individuals. Mock output cannot be written under results/."""
+    from ollab.kgen.run import (
+        SafetyError,
+        dump_document,
+        execute,
+        execute_suite,
+        load_config,
+        write_output,
+        write_suite,
+    )
 
     loaded = load_config(config)
     if model is not None:
         loaded = loaded.model_copy(update={"model": model})
     try:
-        document = execute(loaded, dry_run=dry_run)
+        if loaded.ontologies:
+            documents, summary = execute_suite(loaded, dry_run=dry_run)
+        else:
+            documents, summary = None, None
+            document = execute(loaded, dry_run=dry_run)
     except SafetyError as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=2) from exc
+    if loaded.ontologies:
+        assert documents is not None and summary is not None
+        if dry_run:
+            typer.echo(_suite_text(documents, summary))
+            return
+        destination = write_suite(loaded.output, documents, summary)
+        typer.echo(f"wrote {destination}")
+        return
     text = dump_document(document)
     if dry_run:
         typer.echo(text)
         return
     destination = write_output(loaded.output, document)
     typer.echo(f"wrote {destination}")
+
+
+@kgen_app.command("recompute")
+def kgen_recompute(
+    source: Annotated[Path, typer.Option("--from", help="Archived raw_completions.jsonl.")],
+) -> None:
+    """Rebuild parse, validation, and summary tables from an archive. No LLM call."""
+    from ollab.kgen.recompute import recompute_archive
+    from ollab.kgen.run import write_suite
+
+    documents, summary = recompute_archive(source)
+    destination = write_suite(source.parent, documents, summary)
+    typer.echo(f"wrote {destination}")
+
+
+def _suite_text(documents, summary) -> str:
+    payload = {
+        "documents": [json.loads(item.model_dump_json()) for item in documents],
+        "summary": summary,
+    }
+    return json.dumps(payload, indent=2, sort_keys=True) + "\n"
