@@ -14,6 +14,7 @@ from ollab.core.llm import (
     TokenPrices,
     cache_key,
     default_mock_text,
+    hash_prompt,
     make_client,
 )
 
@@ -133,6 +134,9 @@ def test_cache_key_changes_with_seed_temperature_and_prompt() -> None:
     assert cache_key("mock", "mock://local", _request(temperature=0.2)) != original
     assert cache_key("mock", "mock://local", _request(prompt="other")) != original
     assert cache_key("openai", "mock://local", base) != original
+    other_replicate = base.model_copy(update={"replicate_index": 1})
+    assert cache_key("mock", "mock://local", other_replicate) != original
+    assert hash_prompt(other_replicate) == hash_prompt(base)
 
 
 def test_openai_request_shape_retries_and_redaction(tmp_path: Path) -> None:

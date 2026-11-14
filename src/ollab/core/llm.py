@@ -62,8 +62,16 @@ class LLMRequest(BaseModel):
     system: str | None = None
     temperature: float = 0.0
     seed: int | None = None
+    replicate_index: int = 0
     max_tokens: int = 512
     extra: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("replicate_index")
+    @classmethod
+    def _replicate_index(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError("replicate_index must be non-negative")
+        return value
 
     @field_validator("temperature")
     @classmethod
@@ -111,10 +119,16 @@ class LLMResponse(BaseModel):
     cached: bool
     prompt_eval_count: int | None = None
     eval_count: int | None = None
+    done_reason: str | None = None
 
 
 class RawCompletion(BaseModel):
-    """Provider payload before cache and cost are attached."""
+    """Provider payload before cache and cost are attached.
+
+    ``done_reason`` is the provider stop reason. Ollama sends ``done_reason``.
+    An OpenAI-compatible response uses ``finish_reason``. ``length`` means the
+    token cap stopped the completion. A missing reason stays null.
+    """
 
     model_config = ConfigDict(frozen=True)
 
@@ -123,6 +137,7 @@ class RawCompletion(BaseModel):
     prompt_tokens: int | None
     completion_tokens: int | None
     usage_source: UsageSource
+    done_reason: str | None = None
 
 
 class CompletionProvider(Protocol):
@@ -142,6 +157,7 @@ def hash_prompt(request: LLMRequest) -> str:
     ``{system}\\n---\\n{prompt}``. Existing v1 prompt hashes stay valid.
     Any other version is inserted on its own line:
     ``{system}\\n---\\n{version}\\n---\\n{prompt}``.
+    ``replicate_index`` is not part of this hash and is not part of the prompt.
     """
     system = request.system or ""
     version = request.prompt_version
@@ -162,6 +178,8 @@ def cache_key(
     """SHA-256 of provider, endpoint, model, sampling parameters, and prompt hash.
 
     ``num_ctx`` is included for Ollama, where it changes the context window.
+    ``replicate_index`` is included so two noise-study replicates do not share
+    a cache entry. It is not sent to the provider and it is not in the prompt.
     """
     payload = {
         "provider": provider,
@@ -170,6 +188,7 @@ def cache_key(
         "prompt_hash": hash_prompt(request),
         "temperature": request.temperature,
         "seed": request.seed,
+        "replicate_index": request.replicate_index,
         "max_tokens": request.max_tokens,
         "extra": request.extra,
     }
@@ -240,6 +259,7 @@ class MockProvider:
             prompt_tokens=_whitespace_tokens(request.system, request.prompt),
             completion_tokens=_whitespace_tokens(text),
             usage_source="whitespace_estimate",
+            done_reason="stop",
         )
 
 
@@ -417,6 +437,7 @@ class LLMClient:
             cached=False,
             prompt_eval_count=raw.prompt_tokens if ollama_counts else None,
             eval_count=raw.completion_tokens if ollama_counts else None,
+            done_reason=raw.done_reason,
         )
         if self.cache is not None:
             self.cache.put(
@@ -445,6 +466,7 @@ class LLMClient:
             "prompt_hash": response.prompt_hash,
             "prompt_tokens": response.prompt_tokens,
             "provider": response.provider,
+            "done_reason": response.done_reason,
             "seed": response.seed,
             "temperature": response.temperature,
             "usage_source": response.usage_source,
@@ -467,6 +489,7 @@ def make_client(
     base_url: str | None = None,
     responder: Callable[[LLMRequest], str] | None = None,
     num_ctx: int = 16384,
+    timeout_s: float = 120.0,
 ) -> LLMClient:
     """Build the shared client.
 
@@ -483,6 +506,7 @@ def make_client(
             base_url=resolved_url,
             api_key=resolved_key,
             transport=transport,
+            timeout_s=timeout_s,
             max_attempts=max_attempts,
             backoff_s=backoff_s,
         )
@@ -491,6 +515,7 @@ def make_client(
         backend = OllamaProvider(
             base_url=resolved_url,
             transport=transport,
+            timeout_s=timeout_s,
             max_attempts=max_attempts,
             backoff_s=backoff_s,
             num_ctx=num_ctx,
@@ -552,12 +577,14 @@ def _parse_openai(data: Any, *, fallback_model: str) -> RawCompletion:
         "completion_tokens",
     )
     model = data.get("model")
+    finish = choices[0].get("finish_reason") if isinstance(choices[0], dict) else None
     return RawCompletion(
         text=content,
         model=model if isinstance(model, str) and model else fallback_model,
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
         usage_source=source,
+        done_reason=finish if isinstance(finish, str) else None,
     )
 
 
@@ -570,12 +597,14 @@ def _parse_ollama(data: Any, *, fallback_model: str) -> RawCompletion:
         raise LLMClientError("Ollama message content is not a string")
     prompt_tokens, completion_tokens, source = _usage_pair(data, "prompt_eval_count", "eval_count")
     model = data.get("model")
+    reason = data.get("done_reason")
     return RawCompletion(
         text=content,
         model=model if isinstance(model, str) and model else fallback_model,
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
         usage_source=source,
+        done_reason=reason if isinstance(reason, str) else None,
     )
 
 
