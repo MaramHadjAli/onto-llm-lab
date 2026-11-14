@@ -20,8 +20,8 @@ axiom produces several shapes. Messages name the IRIs involved.
 | The same with a named qualifier class | `sh:qualifiedMinCount` and/or `sh:qualifiedMaxCount`, `sh:qualifiedValueShape` / `sh:class` |
 | `P` a `owl:FunctionalProperty` | Node shape, `sh:targetSubjectsOf P`, `sh:maxCount 1` |
 | `P` a `owl:InverseFunctionalProperty` | Node shape, `sh:targetObjectsOf P`, `sh:path [ sh:inversePath P ]`, `sh:maxCount 1` |
-| `A owl:disjointWith B`, both named | Two node shapes: `sh:targetClass A` / `sh:not [ sh:class B ]` and the converse |
-| `owl:AllDisjointClasses` of named classes | The same pairwise `sh:not` shapes |
+| `A owl:disjointWith B`, both named | One node shape for the unordered pair. `sh:targetClass` is the lexicographically smaller IRI and `sh:not [ sh:class … ]` is the other. The converse shape is not emitted, and a pair already emitted is skipped |
+| `owl:AllDisjointClasses` of named classes | The same: one `sh:not` shape per unordered pair |
 | `C owl:equivalentClass` a bare cardinality restriction, `C` named | The same count constraint as a subclass cardinality axiom. SHACL does not state the converse (every resource meeting the count is in `C`) |
 
 `sh:minCount` and `sh:maxCount` for `exactly n` are both set to `n`.

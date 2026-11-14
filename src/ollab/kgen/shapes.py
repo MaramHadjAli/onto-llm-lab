@@ -7,6 +7,7 @@ inference rules, and this module does not ask pyshacl to run an OWL reasoner.
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 
 from rdflib import BNode, Graph, Literal, URIRef
@@ -43,9 +44,10 @@ def build_shapes(ontology: Ontology) -> ShapeSet:
     graph = Graph()
     graph.bind("sh", SH)
     skipped: list[Untranslated] = []
+    seen_pairs: set[tuple[str, str]] = set()
     for axiom in ontology.axioms():
         before = len(graph)
-        reason = _add_axiom(graph, axiom)
+        reason = _add_axiom(graph, axiom, seen_pairs)
         if reason is not None:
             if len(graph) != before:
                 raise RuntimeError(f"shape emitter skipped {axiom.axiom_id} after writing triples")
@@ -53,7 +55,7 @@ def build_shapes(ontology: Ontology) -> ShapeSet:
     return ShapeSet(graph=graph, untranslated=tuple(skipped))
 
 
-def _add_axiom(graph: Graph, axiom: Axiom) -> str | None:
+def _add_axiom(graph: Graph, axiom: Axiom, seen_pairs: set[tuple[str, str]]) -> str | None:
     if axiom.kind is AxiomKind.DOMAIN and axiom.prop and _is_named(axiom.right):
         _node_shape(
             graph,
@@ -87,7 +89,7 @@ def _add_axiom(graph: Graph, axiom: Axiom) -> str | None:
             )
         return None
     if axiom.kind is AxiomKind.DISJOINT_WITH:
-        return _add_disjoint(graph, axiom)
+        return _add_disjoint(graph, axiom, seen_pairs)
     if axiom.kind is AxiomKind.CARDINALITY:
         return _add_cardinality(graph, axiom)
     if axiom.kind is AxiomKind.SUBCLASS_OF:
@@ -97,21 +99,48 @@ def _add_axiom(graph: Graph, axiom: Axiom) -> str | None:
     return f"no SHACL mapping for {axiom.kind.value}"
 
 
-def _add_disjoint(graph: Graph, axiom: Axiom) -> str | None:
+def _add_disjoint(graph: Graph, axiom: Axiom, seen_pairs: set[tuple[str, str]]) -> str | None:
+    """Emit one shape per unordered pair.
+
+    Disjointness is symmetric, so the converse shape would report the same
+    pair again. A pair already emitted for an earlier axiom is skipped.
+    """
+    pairs: list[tuple[str, str]] = []
     if axiom.source == "disjointWith" and _is_named(axiom.left) and _is_named(axiom.right):
-        _not_class(graph, axiom, axiom.left.iri or "", axiom.right.iri or "", suffix="ab")
-        _not_class(graph, axiom, axiom.right.iri or "", axiom.left.iri or "", suffix="ba")
-        return None
-    if axiom.source == "AllDisjointClasses":
+        left = axiom.left.iri or ""
+        right = axiom.right.iri or ""
+        pairs = [(left, right)]
+    elif axiom.source == "AllDisjointClasses":
         named = [item.iri for item in axiom.members if _is_named(item) and item.iri]
         if len(named) < 2 or len(named) != len(axiom.members):
             return "disjoint group contains a non-named class"
-        for index, left in enumerate(named):
-            for other in named[index + 1 :]:
-                _not_class(graph, axiom, left, other, suffix=f"{index}-{other}")
-                _not_class(graph, axiom, other, left, suffix=f"{other}-{index}")
-        return None
-    return "disjoint axiom is not a pair or group of named classes"
+        pairs = [
+            (left, other)
+            for index, left in enumerate(named)
+            for other in named[index + 1 :]
+            if left and other
+        ]
+    else:
+        return "disjoint axiom is not a pair or group of named classes"
+    for left, right in pairs:
+        _not_class_once(graph, axiom, left, right, seen_pairs)
+    return None
+
+
+def _not_class_once(
+    graph: Graph,
+    axiom: Axiom,
+    left: str,
+    right: str,
+    seen_pairs: set[tuple[str, str]],
+) -> None:
+    key = tuple(sorted((left, right)))
+    if key in seen_pairs:
+        return
+    seen_pairs.add(key)
+    first, second = key
+    digest = hashlib.sha256(f"{first}\0{second}".encode()).hexdigest()[:12]
+    _not_class(graph, axiom, first, second, suffix=digest)
 
 
 def _add_cardinality(graph: Graph, axiom: Axiom) -> str | None:
