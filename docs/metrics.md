@@ -4,6 +4,16 @@ These definitions were written before the Phase 2a run. They are the metrics the
 
 Phase 2a uses one model, prompt v3, and greedy decoding. Temperature is 0. Each ontology contributes 30 target classes, drawn once by `select_classes` with class seed 0 and then sorted by IRI. Each class is generated once per condition: five individuals in that call. A fixed request seed of 0 is part of the call. It keeps the `ind:` namespace and the cache key stable. It is not a replicate, and classes are not resampled by seed.
 
+`configs/kgen_main.yaml` is that 30-class grid, replicate index 0, conditions A0, A1, and A2. `configs/kgen_noise.yaml` keeps the first 10 IRIs of that same sorted draw (`class_pool: 30`, `n_classes: 10`), replicate indexes 0, 1, and 2, conditions A0 and A1. The replicate index is stored on the request, in the cache key, and in the archive. It is not written into the prompt. The published bootstrap uses replicate index 0. Other replicates are reported separately and are not extra classes. `configs/kgen_phase2a_tiny.yaml` is a 3-class plumbing check of the same call shape. It is not the 30-class grid.
+
+## Source of truth
+
+`results/<run>/raw_completions.jsonl` is the source of truth for any reported number. Every generation call, including each A2 repair round and the cached A2 round 0, is one JSON line. Reported tables are copied from `ollab kgen recompute --from` that file. Recompute parses the archived text, runs HermiT and SHACL on the local ontology, and rebuilds the summary. It does not call a model and it does not use the network.
+
+A line stores the run id, ontology path, target class, condition, round, replicate index, prompt version, prompt hash, model, Ollama version (null for a mock run), `num_ctx`, temperature, `max_tokens`, `prompt_eval_count`, `eval_count`, `done_reason`, the raw completion text, and wall-clock seconds. It also stores `seed`, `provider`, `cached`, `n_requested`, and `class_seed`. Those five fields are what the offline rebuild needs for the prefix namespace, the provider label, the uncached token totals, and the class draw. `seed` is the fixed request seed. It is not the replicate index.
+
+Truncation stays its own category. A completion is truncated when `done_reason` is `length`. The unit is truncated when any of its rounds is truncated.
+
 ## Unit of analysis
 
 A **unit** is one target class. The class IRI identifies the ontology. A run of a unit under a condition is one A0 call, one A1 call, or one A2 loop.

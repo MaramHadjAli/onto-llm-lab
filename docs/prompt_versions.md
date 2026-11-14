@@ -26,7 +26,7 @@ The v2 prompt hash inserts the version: `{system}\n---\n{version}\n---\n{prompt}
 
 ## v3
 
-v3 is v2 with one line removed: `Seed: {seed}`. No other v2 line changes. A0 and A1 still differ only by the axioms block. The `@prefix ind:` namespace is still `http://ollab.local/gen/{seed}/{local name}/`. Phase 2 uses one generation per class, so that seed is the constant 0. It is not a replicate. The model is not shown a `Seed:` line. The same constant is sent as Ollama `options.seed` so the request is fully specified. Temperature is the config value and is not written into the prompt. Phase 2 configs set temperature `0`.
+v3 is v2 with one line removed: `Seed: {seed}`. No other v2 line changes. A0 and A1 still differ only by the axioms block. The `@prefix ind:` namespace is still `http://ollab.local/gen/{seed}/{local name}/`. Phase 2 uses one generation per class, so that seed is the constant 0. It is not a replicate. The model is not shown a `Seed:` line. The same constant is sent as Ollama `options.seed` so the request is fully specified. Temperature is the config value and is not written into the prompt. Phase 2 configs set temperature `0`. A noise-study `replicate_index` is stored on the request and in the cache key. It is not written into the prompt, so two replicates of one class share a prompt hash and do not share a cache entry.
 
 v1 and v2 still contain the `Seed:` line. Their prompt text is unchanged, so their prompt hashes stay valid. The v3 hash uses the same versioned input as v2: `{system}\n---\n{version}\n---\n{prompt}`.
 
