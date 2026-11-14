@@ -1,0 +1,31 @@
+# Decoding-noise study. Ten classes per ontology, the first ten IRIs of the
+# same sorted 30-class draw as configs/kgen_main.yaml (class_pool 30).
+# replicate_index 0, 1, and 2. The index is not written into the prompt.
+# Conditions A0 and A1 only.
+ontologies:
+  - data/ontologies/pizza.owl
+  - data/ontologies/wine.owl
+n_classes: 10
+class_pool: 30
+n_individuals: 5
+class_seed: 0
+seeds:
+  - 0
+replicates:
+  - 0
+  - 1
+  - 2
+conditions:
+  - A0
+  - A1
+provider: ollama
+model: qwen2.5:7b
+base_url: http://127.0.0.1:11434
+temperature: 0
+max_tokens: 1500
+num_ctx: 16384
+timeout_s: 600
+prompt_version: v3
+max_repair_rounds: 3
+output: results/kgen_noise
+validate: true

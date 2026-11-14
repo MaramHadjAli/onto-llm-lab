@@ -1,16 +1,15 @@
-# Phase 2a. One greedy generation per target class. The request seed is the
-# constant 0. It is not a replicate. Classes are drawn by select_classes.
-# max_tokens is 4096 so five individuals, and a repair reply, are unlikely to
-# hit num_predict. The v2 smoke completions for three individuals stayed at or
-# below 195 completion tokens (results/smoke_7b_v2/kgen_smoke.json).
-# timeout_s is the HTTP client timeout for a local Ollama call.
+# Plumbing check only. Three classes per ontology, replicate 0, conditions
+# A0/A1/A2. max_tokens and num_ctx match configs/kgen_main.yaml so a measured
+# call can be scaled to that grid. This file is not the 30-class run.
 ontologies:
   - data/ontologies/pizza.owl
   - data/ontologies/wine.owl
-n_classes: 30
+n_classes: 3
 n_individuals: 5
 class_seed: 0
 seeds:
+  - 0
+replicates:
   - 0
 conditions:
   - A0
@@ -20,7 +19,7 @@ provider: ollama
 model: qwen2.5:7b
 base_url: http://127.0.0.1:11434
 temperature: 0
-max_tokens: 4096
+max_tokens: 1500
 num_ctx: 16384
 timeout_s: 600
 prompt_version: v3

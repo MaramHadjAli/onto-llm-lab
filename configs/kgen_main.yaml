@@ -1,0 +1,29 @@
+# Qwen main grid. Run this alone. The Llama A0/A1 grid starts only after it exits.
+# Thirty classes per ontology, drawn by select_classes with class_seed 0
+# and then sorted by IRI. One generation per class per condition.
+# replicate_index 0 only. The request seed is the constant 0.
+ontologies:
+  - data/ontologies/pizza.owl
+  - data/ontologies/wine.owl
+n_classes: 30
+n_individuals: 5
+class_seed: 0
+seeds:
+  - 0
+replicates:
+  - 0
+conditions:
+  - A0
+  - A1
+  - A2
+provider: ollama
+model: qwen2.5:7b
+base_url: http://127.0.0.1:11434
+temperature: 0
+max_tokens: 1500
+num_ctx: 16384
+timeout_s: 600
+prompt_version: v3
+max_repair_rounds: 3
+output: results/kgen_main
+validate: true
