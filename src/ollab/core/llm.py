@@ -58,6 +58,7 @@ class LLMRequest(BaseModel):
 
     model: str
     prompt: str
+    prompt_version: str | None = None
     system: str | None = None
     temperature: float = 0.0
     seed: int | None = None
@@ -135,8 +136,19 @@ class CompletionProvider(Protocol):
 
 
 def hash_prompt(request: LLMRequest) -> str:
-    """SHA-256 of the system text and the user prompt."""
-    raw = (request.system or "") + "\n---\n" + request.prompt
+    """SHA-256 of the system text, the prompt version, and the user prompt.
+
+    A missing version, and version ``v1``, use the historical input
+    ``{system}\\n---\\n{prompt}``. Existing v1 prompt hashes stay valid.
+    Any other version is inserted on its own line:
+    ``{system}\\n---\\n{version}\\n---\\n{prompt}``.
+    """
+    system = request.system or ""
+    version = request.prompt_version
+    if version and version != "v1":
+        raw = f"{system}\n---\n{version}\n---\n{request.prompt}"
+    else:
+        raw = f"{system}\n---\n{request.prompt}"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
