@@ -160,6 +160,8 @@ Token sums and wall-clock totals are totals. They do not get a confidence interv
 
 Wall-clock is `time.perf_counter` around the suite. It includes model calls, cache reads, HermiT, SHACL, and the process overhead of this runner.
 
+The `results/kgen_main` run starts while `ollama pull llama3.1:8b` is still downloading on the same machine. Wall-clock seconds, `llm_elapsed_s`, and token rates from that run are stored. They are not reported as benchmarks. The warm-up call that loads the model sits outside this wall-clock. The metric definitions above stay as written.
+
 These durations are stored separately:
 
 - `llm_elapsed_s` around each provider call, including a cache read

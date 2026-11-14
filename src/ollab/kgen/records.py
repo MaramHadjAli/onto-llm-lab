@@ -70,6 +70,10 @@ class RunOutput(BaseModel):
     replicates: tuple[int, ...] = ()
     run_id: str | None = None
     ollama_version: str | None = None
+    keep_alive: int | str | None = None
+    warmup: bool = False
+    warmup_elapsed_s: float | None = None
+    concurrent_activity: str | None = None
     baseline_consistent: bool | None = None
     baseline_unsatisfiable_classes: tuple[str, ...] = ()
     baseline_error: str | None = None

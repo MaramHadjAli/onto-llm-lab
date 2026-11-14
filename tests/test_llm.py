@@ -244,6 +244,7 @@ def test_ollama_maps_eval_counts() -> None:
     assert body["options"]["seed"] == 7
     assert body["options"]["num_predict"] == 512
     assert body["options"]["num_ctx"] == 16384
+    assert "keep_alive" not in body
     assert response.prompt_tokens == 4
     assert response.completion_tokens == 1
     assert response.prompt_eval_count == 4
@@ -318,6 +319,33 @@ def test_ollama_rejects_a_prompt_that_fills_the_context_window(tmp_path: Path) -
     with pytest.raises(LLMClientError, match="prompt_eval_count 90 >= 0.9 \\* num_ctx 100"):
         failing.complete(_request(model="llama"))
     assert list(cache.rglob("*.json")) == []
+
+
+def test_ollama_sends_keep_alive_when_configured() -> None:
+    transport = ScriptedTransport(
+        [
+            httpx.Response(
+                200,
+                json={
+                    "model": "llama",
+                    "message": {"role": "assistant", "content": "ok"},
+                    "prompt_eval_count": 4,
+                    "eval_count": 1,
+                    "done_reason": "stop",
+                },
+            )
+        ]
+    )
+    client = make_client(
+        "ollama",
+        base_url="http://127.0.0.1:11434",
+        transport=transport,
+        max_attempts=1,
+        keep_alive=-1,
+    )
+    client.complete(_request(model="llama", seed=0, temperature=0.0))
+    body = json.loads(transport.requests[0].content.decode("utf-8"))
+    assert body["keep_alive"] == -1
 
 
 def test_missing_api_key_and_unknown_provider() -> None:

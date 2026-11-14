@@ -9,10 +9,10 @@ from pathlib import Path
 from typing import Self
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from rdflib import Graph
 
-from ollab.core.llm import LLMClient, make_client
+from ollab.core.llm import LLMClient, LLMRequest, make_client
 from ollab.core.ontology import Ontology, load_ontology
 from ollab.kgen.archive import CompletionArchive, fetch_ollama_version, new_run_id
 from ollab.kgen.generate import PromptVersion, generate_individuals, select_classes
@@ -50,12 +50,26 @@ class KgenConfig(BaseModel):
     temperature: float = 0.0
     max_tokens: int = 1024
     num_ctx: int = Field(default=16384, gt=0)
+    keep_alive: int | str | None = None
+    warmup: bool = False
+    concurrent_activity: str | None = None
     timeout_s: float = 120.0
     prompt_version: PromptVersion = "v2"
     max_repair_rounds: int = Field(default=3, ge=0, le=3)
     output: Path = Path("results/kgen_smoke.json")
     base_url: str | None = None
     check: bool = Field(default=True, alias="validate")
+
+    @field_validator("keep_alive")
+    @classmethod
+    def _keep_alive(cls, value: int | str | None) -> int | str | None:
+        if isinstance(value, str):
+            if not value.strip():
+                raise ValueError("keep_alive must not be empty")
+            return value
+        if isinstance(value, bool) or (isinstance(value, int) and value < -1):
+            raise ValueError("keep_alive must be -1 or a non-negative number of seconds")
+        return value
 
     @model_validator(mode="after")
     def _protocol(self) -> Self:
@@ -131,6 +145,7 @@ def execute(
     client: LLMClient | None = None,
     cwd: Path | None = None,
     archive: CompletionArchive | None = None,
+    warmup_elapsed_s: float | None = None,
 ) -> RunOutput:
     """Generate individuals for every class, seed, and condition of one ontology.
 
@@ -256,6 +271,10 @@ def execute(
         replicates=tuple(config.replicates),
         run_id=None if archive is None else archive.run_id,
         ollama_version=None if archive is None else archive.ollama_version,
+        keep_alive=config.keep_alive,
+        warmup=config.warmup,
+        warmup_elapsed_s=warmup_elapsed_s,
+        concurrent_activity=config.concurrent_activity,
         baseline_consistent=None if baseline is None else baseline.consistent,
         baseline_unsatisfiable_classes=() if baseline is None else baseline.unsatisfiable_classes,
         baseline_error=None if baseline is None else baseline.error,
@@ -278,6 +297,7 @@ def execute_suite(
         )
     paths = tuple(config.ontologies) if config.ontologies else (config.ontology,)
     llm = client or _make(config, cwd)
+    warmup_elapsed = _warmup(config, llm)
     archive = None
     if not dry_run:
         directory = _resolve(config.output, cwd)
@@ -288,6 +308,7 @@ def execute_suite(
             directory / "raw_completions.jsonl",
             run_id=new_run_id(),
             ollama_version=version,
+            concurrent_activity=config.concurrent_activity,
         )
     started = time.perf_counter()
     documents = []
@@ -295,7 +316,16 @@ def execute_suite(
         if path is None:
             continue
         one = config.model_copy(update={"ontology": path, "ontologies": []})
-        documents.append(execute(one, dry_run=True, client=llm, cwd=cwd, archive=archive))
+        documents.append(
+            execute(
+                one,
+                dry_run=True,
+                client=llm,
+                cwd=cwd,
+                archive=archive,
+                warmup_elapsed_s=warmup_elapsed,
+            )
+        )
     wall_clock_s = time.perf_counter() - started
     from ollab.kgen.summarize import summarize
 
@@ -343,6 +373,24 @@ def _round(generated, metrics, consistency, conforms, violations, elapsed, clean
     )
 
 
+def _warmup(config: KgenConfig, client: LLMClient) -> float | None:
+    """Load the model with one short call. The text is not archived."""
+    if not config.warmup:
+        return None
+    started = time.perf_counter()
+    client.provider.complete(
+        LLMRequest(
+            model=config.model,
+            prompt="Reply with the single word ready.",
+            prompt_version=config.prompt_version,
+            temperature=config.temperature,
+            seed=0,
+            max_tokens=8,
+        )
+    )
+    return time.perf_counter() - started
+
+
 def _make(config: KgenConfig, cwd: Path | None) -> LLMClient:
     return make_client(
         config.provider,
@@ -350,6 +398,7 @@ def _make(config: KgenConfig, cwd: Path | None) -> LLMClient:
         cache_dir=_cache_dir(cwd),
         num_ctx=config.num_ctx,
         timeout_s=config.timeout_s,
+        keep_alive=config.keep_alive,
     )
 
 

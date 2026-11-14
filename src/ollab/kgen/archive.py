@@ -46,10 +46,18 @@ def fetch_ollama_version(base_url: str) -> str | None:
 class CompletionArchive:
     """One JSON line per completion, including each A2 round."""
 
-    def __init__(self, path: Path, *, run_id: str, ollama_version: str | None) -> None:
+    def __init__(
+        self,
+        path: Path,
+        *,
+        run_id: str,
+        ollama_version: str | None,
+        concurrent_activity: str | None = None,
+    ) -> None:
         self.path = path
         self.run_id = run_id
         self.ollama_version = ollama_version
+        self.concurrent_activity = concurrent_activity
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_text("", encoding="utf-8")
 
@@ -67,6 +75,7 @@ class CompletionArchive:
         row = {
             "cached": generation.cached,
             "class_seed": class_seed,
+            "concurrent_activity": self.concurrent_activity,
             "condition": generation.condition,
             "done_reason": generation.done_reason,
             "eval_count": generation.eval_count,

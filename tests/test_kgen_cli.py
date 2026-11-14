@@ -218,3 +218,49 @@ def test_recompute_rebuilds_tables_from_mock_completions(tmp_path: Path) -> None
     written = json.loads((output / "mini.json").read_text(encoding="utf-8"))
     assert written["records"][0]["metrics"]["parse_ok"] is documents[0].records[0].metrics.parse_ok
     assert written["records"][2]["round0_cached"] is True
+
+
+def test_warmup_is_not_archived(tmp_path: Path) -> None:
+    from ollab.core.llm import make_client
+    from ollab.kgen.run import KgenConfig, execute_suite
+
+    prompts: list[str] = []
+
+    def respond(request) -> str:
+        prompts.append(request.prompt)
+        return "ind:1 a :Pizza .\n"
+
+    ontology = tmp_path / "mini.ttl"
+    ontology.write_text(MINI.read_text(encoding="utf-8"), encoding="utf-8")
+    output = tmp_path / "run"
+    config = KgenConfig(
+        ontologies=[ontology],
+        n_classes=1,
+        n_individuals=1,
+        seeds=[0],
+        conditions=["A0"],
+        provider="mock",
+        model="mock-1",
+        temperature=0,
+        max_tokens=64,
+        prompt_version="v3",
+        warmup=True,
+        keep_alive=-1,
+        concurrent_activity="ollama pull llama3.1:8b was running in parallel",
+        output=output,
+        check=False,
+    )
+    client = make_client("mock", cache_dir=tmp_path / "cache", responder=respond)
+    documents, _summary = execute_suite(config, client=client)
+    assert prompts[0] == "Reply with the single word ready."
+    assert len(prompts) == 2
+    lines = [
+        json.loads(line)
+        for line in (output / "raw_completions.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert len(lines) == 1
+    assert lines[0]["raw_text"] == "ind:1 a :Pizza .\n"
+    assert lines[0]["concurrent_activity"] == "ollama pull llama3.1:8b was running in parallel"
+    assert documents[0].warmup is True
+    assert documents[0].keep_alive == -1
+    assert documents[0].warmup_elapsed_s is not None

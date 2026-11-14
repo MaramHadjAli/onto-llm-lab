@@ -347,6 +347,9 @@ def _protocol(documents: Sequence[RunOutput]) -> dict[str, object]:
         return {}
     first = documents[0]
     return {
+        "concurrent_activity": first.concurrent_activity,
+        "keep_alive": first.keep_alive,
+        "warmup": first.warmup,
         "max_tokens": first.max_tokens,
         "model": first.model,
         "n_individuals": first.n_individuals,

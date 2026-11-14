@@ -22,6 +22,9 @@ base_url: http://127.0.0.1:11434
 temperature: 0
 max_tokens: 1500
 num_ctx: 16384
+keep_alive: -1
+warmup: true
+concurrent_activity: "ollama pull llama3.1:8b was running in parallel"
 timeout_s: 600
 prompt_version: v3
 max_repair_rounds: 3

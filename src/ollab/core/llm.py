@@ -342,6 +342,7 @@ class OllamaProvider:
         max_attempts: int = 3,
         backoff_s: float = 0.5,
         num_ctx: int = 16384,
+        keep_alive: int | str | None = None,
     ) -> None:
         if max_attempts < 1:
             raise ValueError("max_attempts must be positive")
@@ -349,6 +350,7 @@ class OllamaProvider:
             raise ValueError("num_ctx must be a positive integer")
         self.endpoint = base_url.rstrip("/")
         self.num_ctx = num_ctx
+        self.keep_alive = keep_alive
         self._max_attempts = max_attempts
         self._backoff_s = backoff_s
         self._client = httpx.Client(base_url=self.endpoint, transport=transport, timeout=timeout_s)
@@ -369,6 +371,8 @@ class OllamaProvider:
             "stream": False,
             "options": options,
         }
+        if self.keep_alive is not None:
+            payload["keep_alive"] = self.keep_alive
         response = _post_json(
             self._client,
             "/api/chat",
@@ -490,6 +494,7 @@ def make_client(
     responder: Callable[[LLMRequest], str] | None = None,
     num_ctx: int = 16384,
     timeout_s: float = 120.0,
+    keep_alive: int | str | None = None,
 ) -> LLMClient:
     """Build the shared client.
 
@@ -519,6 +524,7 @@ def make_client(
             max_attempts=max_attempts,
             backoff_s=backoff_s,
             num_ctx=num_ctx,
+            keep_alive=keep_alive,
         )
     else:
         raise LLMClientError(f"unknown LLM provider: {provider}")

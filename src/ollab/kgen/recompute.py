@@ -113,6 +113,9 @@ def _document(ontology_path: str, rows: list[dict[str, object]]) -> RunOutput:
         replicates=tuple(replicates),
         run_id=str(first["run_id"]),
         ollama_version=None if first["ollama_version"] is None else str(first["ollama_version"]),
+        concurrent_activity=(
+            None if first.get("concurrent_activity") is None else str(first["concurrent_activity"])
+        ),
         baseline_consistent=baseline.consistent,
         baseline_unsatisfiable_classes=baseline.unsatisfiable_classes,
         baseline_error=baseline.error,
