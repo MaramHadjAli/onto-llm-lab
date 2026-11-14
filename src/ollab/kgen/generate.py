@@ -1,4 +1,4 @@
-"""A0 and A1 individual generation.
+"""A0, A1, and A2 individual generation.
 
 A0 puts class and property names in the prompt. A1 adds the verbalised
 axioms that mention the target class, plus domain, range, and functional
@@ -26,12 +26,15 @@ prepends the prompt's exact ``@prefix`` block. ``prefix_completed_parse_ok``
 is true when that text parses. Validation uses the prefix-completed graph.
 
 Prompt ``v1`` is the original wording. Prompt ``v2`` changes the output
-instruction, the typing instruction, and the target-class line. A0 and A1
-still differ only by the axioms block. See ``docs/prompt_versions.md``.
+instruction, the typing instruction, and the target-class line. Prompt ``v3``
+is ``v2`` without the ``Seed:`` line. The sampling seed is sent to the
+provider instead. A0 and A1 still differ only by the axioms block. A2 round 0
+sends the A1 prompt. See ``docs/prompt_versions.md``.
 """
 
 from __future__ import annotations
 
+import time
 from collections import Counter
 from typing import Literal
 
@@ -45,8 +48,9 @@ from ollab.core.llm import LLMClient, LLMRequest
 from ollab.core.ontology import Axiom, Expr, Ontology
 from ollab.core.verbalize import local_name, verbalize
 
-Condition = Literal["A0", "A1"]
-PromptVersion = Literal["v1", "v2"]
+PromptCondition = Literal["A0", "A1"]
+Condition = Literal["A0", "A1", "A2"]
+PromptVersion = Literal["v1", "v2", "v3"]
 _DECLARED_PREFIXES = (
     ("rdf", "http://www.w3.org/1999/02/22-rdf-syntax-ns#"),
     ("rdfs", "http://www.w3.org/2000/01/rdf-schema#"),
@@ -97,6 +101,10 @@ class GenerationRecord(BaseModel):
     raw_text: str
     prompt_eval_count: int | None = None
     eval_count: int | None = None
+    done_reason: str | None = None
+    truncated: bool | None = None
+    cached: bool = False
+    llm_elapsed_s: float | None = None
 
 
 def select_classes(ontology: Ontology, n: int, seed: int) -> tuple[str, ...]:
@@ -125,7 +133,7 @@ def build_prompt(
     ontology: Ontology,
     target_class: str,
     *,
-    condition: Condition,
+    condition: PromptCondition,
     n_individuals: int,
     seed: int,
     prompt_version: PromptVersion = "v2",
@@ -133,9 +141,9 @@ def build_prompt(
     """Build the A0 or A1 user prompt. The system message is unused.
 
     A1 is the A0 text plus the axioms block. Nothing earlier in the prompt
-    depends on the condition. ``v1`` and ``v2`` share that split; the version
-    only changes the three instruction lines described in
-    ``docs/prompt_versions.md``.
+    depends on the condition. ``v1`` and ``v2`` share that split. ``v3`` is
+    ``v2`` without the ``Seed:`` line. The version only changes the instruction
+    lines described in ``docs/prompt_versions.md``.
     """
     _require_prompt_version(prompt_version)
     labels = prompt_labels(ontology)
@@ -201,7 +209,7 @@ def generate_individuals(
     client: LLMClient,
     *,
     target_class: str,
-    condition: Condition,
+    condition: PromptCondition,
     n_individuals: int,
     seed: int,
     model: str,
@@ -216,7 +224,6 @@ def generate_individuals(
     prepended before the third parse is the same block the prompt starts with.
     """
     del ontology_path
-    _require_prompt_version(prompt_version)
     prompt = build_prompt(
         ontology,
         target_class,
@@ -225,6 +232,42 @@ def generate_individuals(
         seed=seed,
         prompt_version=prompt_version,
     )
+    return complete_prompt(
+        ontology,
+        client,
+        prompt=prompt,
+        condition=condition,
+        target_class=target_class,
+        n_individuals=n_individuals,
+        seed=seed,
+        model=model,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        prompt_version=prompt_version,
+    )
+
+
+def complete_prompt(
+    ontology: Ontology,
+    client: LLMClient,
+    *,
+    prompt: str,
+    condition: Condition,
+    target_class: str,
+    n_individuals: int,
+    seed: int,
+    model: str,
+    temperature: float,
+    max_tokens: int,
+    prompt_version: PromptVersion,
+) -> GenerationRecord:
+    """Complete ``prompt`` and parse it the same way as a generation call.
+
+    Repair rounds use this with the A2 repair prompt. The prefix block still
+    comes from the target class and the seed, not from the completion.
+    """
+    _require_prompt_version(prompt_version)
+    started = time.perf_counter()
     response = client.complete(
         LLMRequest(
             model=model,
@@ -235,6 +278,7 @@ def generate_individuals(
             max_tokens=max_tokens,
         )
     )
+    elapsed = time.perf_counter() - started
     raw = response.text
     _, strict_error, _ = _parse_graph(raw)
     extracted = extract_turtle(raw)
@@ -272,6 +316,10 @@ def generate_individuals(
         raw_text=raw,
         prompt_eval_count=response.prompt_eval_count,
         eval_count=response.eval_count,
+        done_reason=response.done_reason,
+        truncated=_truncated(response.done_reason),
+        cached=response.cached,
+        llm_elapsed_s=elapsed,
     )
 
 
@@ -303,8 +351,10 @@ def extract_turtle(text: str) -> str:
     otherwise the first fence is used. With no fence, the stripped text is
     returned unchanged.
 
-    This is the only repair applied to model output. It does not add
-    prefixes, insert punctuation, or rewrite IRIs. A0 and A1 both call it.
+    This is the only syntactic repair applied to model output. It does not add
+    prefixes, insert punctuation, or rewrite IRIs. A0, A1, and A2 all call it.
+    The A2 loop asks the model for a new completion. It does not change this
+    function.
     """
     stripped = text.strip()
     spans = _fence_spans(stripped)
@@ -456,9 +506,16 @@ def _namespace_of(iri: str) -> str:
     return iri
 
 
+def _truncated(done_reason: str | None) -> bool | None:
+    """True only when the provider stopped because it hit the token cap."""
+    if done_reason is None:
+        return None
+    return done_reason == "length"
+
+
 def _require_prompt_version(prompt_version: str) -> None:
-    if prompt_version not in ("v1", "v2"):
-        raise ValueError(f"prompt_version must be 'v1' or 'v2', got {prompt_version!r}")
+    if prompt_version not in ("v1", "v2", "v3"):
+        raise ValueError(f"prompt_version must be 'v1', 'v2', or 'v3', got {prompt_version!r}")
 
 
 def _instruction_lines(
@@ -470,7 +527,10 @@ def _instruction_lines(
     labels: dict[str, str],
     prefixes: dict[str, str],
 ) -> list[str]:
-    """The shared instruction block. v1 text is the original wording."""
+    """The shared instruction block. v1 text is the original wording.
+
+    v3 uses the v2 lines and omits ``Seed: {seed}``.
+    """
     if prompt_version == "v1":
         type_line = "Every individual must have an explicit rdf:type."
         output_line = "Output Turtle only, with no markdown fence and no explanation."
@@ -489,18 +549,24 @@ def _instruction_lines(
             "a markdown fence: the prefixes above are already declared."
         )
         target_line = f"Target class: {_curie(target_class, prefixes)}"
-    return [
+    lines = [
         "",
         f"Generate {n_individuals} RDF individuals as Turtle.",
         "Use only the class and property IRIs listed below, plus new individual IRIs.",
         type_line,
         output_line,
-        f"Seed: {seed}",
-        target_line,
-        "Individual IRI pattern: ind:N",
-        "",
-        "Classes:",
     ]
+    if prompt_version != "v3":
+        lines.append(f"Seed: {seed}")
+    lines.extend(
+        [
+            target_line,
+            "Individual IRI pattern: ind:N",
+            "",
+            "Classes:",
+        ]
+    )
+    return lines
 
 
 def _prompt_namespaces(ontology: Ontology, target_class: str, seed: int) -> tuple[str, str]:
