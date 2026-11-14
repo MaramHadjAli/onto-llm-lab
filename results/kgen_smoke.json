@@ -1,4 +1,5 @@
 {
+  "disclaimer": "pipeline smoke only; model too small; not usable for any claim",
   "class_seed": 0,
   "model": "qwen2.5:0.5b",
   "ontology": "C:\\Users\\maram\\OneDrive\\Desktop\\onto-llm-lab\\onto-llm-lab\\data\\ontologies\\pizza.owl",
